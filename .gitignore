@@ -1,0 +1,5 @@
+.dart_tool/
+pubspec.lock
+build/
+*.log
+dbg-out.txt

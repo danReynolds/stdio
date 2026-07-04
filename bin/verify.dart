@@ -1,0 +1,120 @@
+// End-to-end verification of stdio_capture. Runs standalone (NOT under
+// `dart test`, which owns stdout/stderr) and reports via stderr, which we never
+// redirect during a check. exit(0) iff everything passes.
+
+import 'dart:convert';
+import 'dart:ffi';
+import 'dart:io';
+
+import 'package:ffi/ffi.dart';
+import 'package:stdio_capture/stdio_capture.dart';
+
+// A stand-in for native/FFI code: write bytes straight to a fd, bypassing Dart.
+final _write = DynamicLibrary.process().lookupFunction<
+    IntPtr Function(Int32, Pointer<Uint8>, IntPtr),
+    int Function(int, Pointer<Uint8>, int)>('write');
+void nativeWrite(int fd, String s) {
+  final bytes = utf8.encode(s);
+  final buf = malloc<Uint8>(bytes.length);
+  buf.asTypedList(bytes.length).setAll(0, bytes);
+  var off = 0;
+  while (off < bytes.length) {
+    final w = _write(fd, buf + off, bytes.length - off);
+    if (w <= 0) break;
+    off += w;
+  }
+  malloc.free(buf);
+}
+
+int _failures = 0;
+void check(bool ok, String label) {
+  stderr.writeln('${ok ? "  ✓" : "  ✗ FAIL"}  $label');
+  if (!ok) _failures++;
+}
+
+Future<void> main() async {
+  stderr.writeln('== A. collect() captures native + Dart, tagged ==');
+  final a = await StdioCapture.collect(() {
+    print('dart-print-out');
+    stderr.writeln('dart-stderr-err');
+    nativeWrite(1, 'native-out\n');
+    nativeWrite(2, 'native-err\n');
+  });
+  check(a.out.contains('dart-print-out'), 'Dart print → stdout');
+  check(a.out.contains('native-out'), 'native write(1) → stdout  [the core]');
+  check(a.err.contains('dart-stderr-err'), 'Dart stderr → stderr');
+  check(a.err.contains('native-err'), 'native write(2) → stderr  [the core]');
+  check(!a.out.contains('native-err') && !a.err.contains('native-out'),
+      'streams kept distinct');
+
+  stderr.writeln('== B. start()/stop() controller: streams + history + restore ==');
+  final b = await StdioCapture.start();
+  final bOut = <String>[];
+  b.stdout.listen((l) => bOut.add(l.text));
+  print('controller-out-line');
+  nativeWrite(2, 'controller-err-line\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await b.stop();
+  check(b.history.any((l) => l.text.contains('controller-out-line')),
+      'history has the stdout line');
+  check(b.history.any((l) => l.text.contains('controller-err-line')),
+      'history has the stderr line');
+  check(!b.isActive, 'isActive false after stop');
+
+  stderr.writeln('== C. storm: >pipe-capacity while main is busy → no deadlock ==');
+  const stormN = 40000;
+  final sw = Stopwatch()..start();
+  final c = await StdioCapture.collect(() {
+    for (var i = 0; i < stormN; i++) {
+      nativeWrite(1, 'storm-line-$i-padding-padding-padding-padding\n');
+    }
+  });
+  sw.stop();
+  check(true, 'completed without deadlock in ${sw.elapsedMilliseconds}ms');
+  check(c.lines.length < stormN,
+      'bounded: kept ${c.lines.length} of $stormN (dropped the rest)');
+
+  stderr.writeln('== D. double-start throws ==');
+  final d = await StdioCapture.start();
+  var threw = false;
+  try {
+    await StdioCapture.start();
+  } on StateError {
+    threw = true;
+  }
+  await d.stop();
+  check(threw, 'second start() threw StateError');
+
+  stderr.writeln('== E. divertToFile writes both streams to a file ==');
+  final tmp = File('${Directory.systemTemp.path}/stdio_capture_verify.log');
+  if (tmp.existsSync()) tmp.deleteSync();
+  final div = await StdioCapture.divertToFile(tmp);
+  print('file-out-line');
+  nativeWrite(2, 'file-err-line\n');
+  await stdout.flush();
+  await div.stop();
+  final contents = tmp.readAsStringSync();
+  check(contents.contains('file-out-line') && contents.contains('file-err-line'),
+      'file has both lines');
+  tmp.deleteSync();
+
+  stderr.writeln('== F. mirrorToFile durable log ==');
+  final mirror = File('${Directory.systemTemp.path}/stdio_capture_mirror.log');
+  if (mirror.existsSync()) mirror.deleteSync();
+  final f = await StdioCapture.start(mirrorToFile: mirror);
+  nativeWrite(1, 'mirror-line-1\n');
+  nativeWrite(2, 'mirror-line-2\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await f.stop();
+  final mirrorContents = mirror.readAsStringSync();
+  check(mirrorContents.contains('mirror-line-1') &&
+      mirrorContents.contains('mirror-line-2'), 'mirror file has both lines');
+  mirror.deleteSync();
+
+  // This must appear on the REAL terminal — proof restore worked.
+  stderr.writeln('== restore proof: this line is on the real terminal ==');
+  stderr.writeln(_failures == 0
+      ? '\nALL CHECKS PASSED ✓'
+      : '\n$_failures CHECK(S) FAILED ✗');
+  exit(_failures == 0 ? 0 : 1);
+}
