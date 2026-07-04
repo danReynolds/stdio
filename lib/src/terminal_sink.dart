@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io' show IOSink;
+import 'dart:io' show IOSink, Stdout, StdoutException;
 
 import 'posix.dart';
 
@@ -30,7 +30,7 @@ abstract interface class TerminalSink implements IOSink {
 /// and loop over partial writes / EINTR (see [fdWriteAll] in posix.dart), so a
 /// frame can't be truncated.
 final class FdTerminalSink implements TerminalSink {
-  FdTerminalSink(this._fd, {this.encoding = utf8});
+  FdTerminalSink(int fd, {this.encoding = utf8}) : _fd = fd;
 
   final int _fd;
 
@@ -103,4 +103,25 @@ final class FdTerminalSink implements TerminalSink {
 
   @override
   Future<void> get done => Future<void>.value();
+}
+
+/// A [Stdout]-compatible adapter over the saved terminal fd, for consumers (a
+/// TUI driver, say) that expect a concrete [Stdout] rather than an [IOSink].
+/// Reuses [FdTerminalSink]'s write path.
+final class StdoutTerminalSink extends FdTerminalSink implements Stdout {
+  StdoutTerminalSink(super.fd, {super.encoding});
+
+  @override
+  int get terminalColumns =>
+      columns ?? (throw StdoutException('stdio_capture: not a terminal'));
+
+  @override
+  int get terminalLines =>
+      rows ?? (throw StdoutException('stdio_capture: not a terminal'));
+
+  @override
+  IOSink get nonBlocking => this; // writes are already unbuffered
+
+  @override
+  String lineTerminator = '\n';
 }

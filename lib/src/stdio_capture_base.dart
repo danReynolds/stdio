@@ -85,6 +85,10 @@ final class StdioCapture {
   /// The real terminal, for rendering (the saved dup of fd 1).
   final TerminalSink terminal;
 
+  /// The same terminal as a concrete [io.Stdout], for consumers (a TUI driver)
+  /// that require the concrete type rather than a [TerminalSink]/[IOSink].
+  late final io.Stdout terminalStdout = StdoutTerminalSink(_savedFd);
+
   final _out = StreamController<CapturedLine>.broadcast();
   final _err = StreamController<CapturedLine>.broadcast();
   final _combined = StreamController<CapturedLine>.broadcast();
