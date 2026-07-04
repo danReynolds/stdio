@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io' as io;
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'captured_line.dart';
+import 'line_assembler.dart';
 import 'posix.dart';
 import 'reader.dart';
 import 'terminal_sink.dart';
@@ -99,6 +101,9 @@ final class StdioCapture {
   int _droppedBytes = 0;
   bool _stopped = false;
 
+  /// Optional best-effort source tag for the in-process merged stream.
+  String? Function(CapturedLine line)? _classify;
+
   /// stdout lines only (exact within-stream order). Broadcast — pair with
   /// [history] for output produced before you subscribed.
   Stream<CapturedLine> get stdout => _out.stream;
@@ -131,6 +136,7 @@ final class StdioCapture {
   static Future<StdioCapture> start({
     int backlogLines = 4096,
     io.File? mirrorToFile,
+    String? Function(CapturedLine line)? classify,
   }) async {
     if (_busy) {
       throw StateError(
@@ -195,6 +201,7 @@ final class StdioCapture {
         terminal: FdTerminalSink(savedFd),
         backlogLines: backlogLines,
       );
+      cap._classify = classify;
       fromReader.listen(cap._onReaderMessage);
       return cap;
     } catch (e) {
@@ -216,15 +223,52 @@ final class StdioCapture {
     final lines = msg.lines;
     if (lines != null && lines.isNotEmpty) {
       for (final l in lines) {
-        _history.add(l);
-        if (_history.length > _backlogLines) _history.removeAt(0);
-        if (!_combined.isClosed) _combined.add(l);
-        final c = l.stream == StdStream.out ? _out : _err;
-        if (!c.isClosed) c.add(l);
+        _emit(l);
       }
       _sendControl(ctrlCredit); // replenish the reader's send credit
     }
     if (msg.done && !_readerDone.isCompleted) _readerDone.complete();
+  }
+
+  /// Add a line to history + the streams, applying the classifier if the line is
+  /// untagged. Shared by the reader path and subprocess adoption.
+  void _emit(CapturedLine l) {
+    if (l.source == null && _classify != null) l.source = _classify!(l);
+    _history.add(l);
+    if (_history.length > _backlogLines) _history.removeAt(0);
+    if (!_combined.isClosed) _combined.add(l);
+    final c = l.stream == StdStream.out ? _out : _err;
+    if (!c.isClosed) c.add(l);
+  }
+
+  /// Spawn a child, tagging its stdout/stderr with [source] and merging them
+  /// into this capture. Started in `normal` mode (separate pipes) so its lines
+  /// can be tagged — an `inheritStdio` child would flow through fd 1/2 already,
+  /// untagged.
+  Future<io.Process> startProcess(String executable, List<String> arguments,
+      {required String source,
+      String? workingDirectory,
+      Map<String, String>? environment}) async {
+    final proc = await io.Process.start(executable, arguments,
+        workingDirectory: workingDirectory, environment: environment);
+    adopt(proc, source: source);
+    return proc;
+  }
+
+  /// Tag an already-started (`normal`-mode) child's output with [source] and
+  /// merge it. Only safe if nothing else has listened to [child]'s streams yet.
+  void adopt(io.Process child, {required String source}) {
+    _pipeChild(child.stdout, StdStream.out, source);
+    _pipeChild(child.stderr, StdStream.err, source);
+  }
+
+  void _pipeChild(Stream<List<int>> stream, StdStream s, String source) {
+    final asm = LineAssembler((bytes) => _emit(CapturedLine(
+        rawBytes: bytes, stream: s, at: DateTime.now(), source: source)));
+    stream.listen(
+      (chunk) => asm.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk)),
+      onDone: asm.flush,
+    );
   }
 
   void _sendControl(int byte) {

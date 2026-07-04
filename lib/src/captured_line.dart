@@ -26,8 +26,9 @@ final class CapturedLine {
   final DateTime at;
 
   /// A subprocess / classifier tag, if known. Null for the plain in-process
-  /// stream until a classifier or [adopt]/[startProcess] supplies one.
-  final String? source;
+  /// stream until a classifier or `adopt`/`startProcess` supplies one. Mutable
+  /// so a main-isolate classifier can tag a line after the reader emits it.
+  String? source;
 
   String? _text;
 

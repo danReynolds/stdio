@@ -13,8 +13,8 @@ import 'package:stdio_capture/stdio_capture.dart';
 final _write = DynamicLibrary.process().lookupFunction<
     IntPtr Function(Int32, Pointer<Uint8>, IntPtr),
     int Function(int, Pointer<Uint8>, int)>('write');
-void nativeWrite(int fd, String s) {
-  final bytes = utf8.encode(s);
+void nativeWrite(int fd, String s) => nativeWriteBytes(fd, utf8.encode(s));
+void nativeWriteBytes(int fd, List<int> bytes) {
   final buf = malloc<Uint8>(bytes.length);
   buf.asTypedList(bytes.length).setAll(0, bytes);
   var off = 0;
@@ -110,6 +110,49 @@ Future<void> main() async {
   check(mirrorContents.contains('mirror-line-1') &&
       mirrorContents.contains('mirror-line-2'), 'mirror file has both lines');
   mirror.deleteSync();
+
+  stderr.writeln('== G. startProcess tags a subprocess ==');
+  final g = await StdioCapture.start();
+  final proc = await g.startProcess(
+      'sh', ['-c', 'echo child-out; echo child-err >&2'],
+      source: 'child');
+  await proc.exitCode;
+  await Future<void>.delayed(const Duration(milliseconds: 100));
+  await g.stop();
+  check(
+      g.history.any((l) =>
+          l.text.contains('child-out') &&
+          l.source == 'child' &&
+          l.stream == StdStream.out),
+      'child stdout tagged source=child');
+  check(
+      g.history.any((l) =>
+          l.text.contains('child-err') &&
+          l.source == 'child' &&
+          l.stream == StdStream.err),
+      'child stderr tagged source=child');
+
+  stderr.writeln('== H. classifier tags the in-process stream ==');
+  final h = await StdioCapture.start(
+      classify: (l) => l.text.startsWith('TAG:') ? 'tagged' : null);
+  nativeWrite(1, 'TAG:hello\n');
+  nativeWrite(1, 'plain\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await h.stop();
+  check(h.history.any((l) => l.text == 'TAG:hello' && l.source == 'tagged'),
+      'classifier tagged the matching line');
+  check(h.history.any((l) => l.text == 'plain' && l.source == null),
+      'classifier left the non-matching line null');
+
+  stderr.writeln('== I. multi-byte UTF-8 split across writes ==');
+  final iCap = await StdioCapture.start();
+  final snow = utf8.encode('snow☃man'); // ☃ is 3 bytes (E2 98 83)
+  nativeWriteBytes(1, snow.sublist(0, 5)); // splits mid-☃
+  nativeWriteBytes(1, [...snow.sublist(5), 0x0A]);
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await iCap.stop();
+  check(iCap.history.any((l) => l.text == 'snow☃man'),
+      'codepoint reassembled across the read boundary');
 
   // This must appear on the REAL terminal — proof restore worked.
   stderr.writeln('== restore proof: this line is on the real terminal ==');

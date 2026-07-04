@@ -14,6 +14,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'captured_line.dart';
+import 'line_assembler.dart';
 import 'posix.dart';
 
 /// Spawn payload. All fields are isolate-sendable.
@@ -66,8 +67,10 @@ class _Reader {
   _Reader(this.cfg);
   final ReaderConfig cfg;
 
-  final _outPartial = BytesBuilder();
-  final _errPartial = BytesBuilder();
+  late final LineAssembler _outAsm =
+      LineAssembler((b) => _emitLine(b, StdStream.out));
+  late final LineAssembler _errAsm =
+      LineAssembler((b) => _emitLine(b, StdStream.err));
   final _ring = <CapturedLine>[];
   final _mirrorBuf = BytesBuilder();
 
@@ -112,16 +115,25 @@ class _Reader {
           _drainControl(cfg.controlReadFd, readBuf);
         }
         if (!_outDone && pfds[0].revents & (pollIn | pollHup | pollErr) != 0) {
-          _drainStream(cfg.outReadFd, StdStream.out, _outPartial, readBuf);
+          _drainStream(cfg.outReadFd, StdStream.out, _outAsm, readBuf);
         }
         if (!_errDone && pfds[1].revents & (pollIn | pollHup | pollErr) != 0) {
-          _drainStream(cfg.errReadFd, StdStream.err, _errPartial, readBuf);
+          _drainStream(cfg.errReadFd, StdStream.err, _errAsm, readBuf);
         }
 
         _flushMirror();
         _shipBatches();
 
         if (_stop || (_outDone && _errDone && _ring.isEmpty)) {
+          // Final non-blocking drain: the stop byte can race ahead of a poll
+          // wake, so data may still be buffered in the pipes. Read whatever's
+          // left before finishing (the write ends are already closed).
+          if (!_outDone) {
+            _drainStream(cfg.outReadFd, StdStream.out, _outAsm, readBuf);
+          }
+          if (!_errDone) {
+            _drainStream(cfg.errReadFd, StdStream.err, _errAsm, readBuf);
+          }
           _finish();
           break;
         }
@@ -133,18 +145,17 @@ class _Reader {
     }
   }
 
-  /// Drain a pipe read-end fully (it's non-blocking) into whole lines.
-  void _drainStream(int fd, StdStream stream, BytesBuilder partial,
-      Pointer<Uint8> buf) {
+  /// Drain a pipe read-end fully (it's non-blocking) into whole lines via [asm].
+  void _drainStream(
+      int fd, StdStream stream, LineAssembler asm, Pointer<Uint8> buf) {
     while (true) {
       final n = readFd(fd, buf, 64 * 1024);
       if (n > 0) {
-        // Copy out of the reused native buffer immediately — [partial] and any
-        // sublist views must not alias memory the next read() will overwrite.
-        _assemble(Uint8List.fromList(buf.asTypedList(n)), stream, partial);
+        // Copy out of the reused native buffer immediately — the assembler
+        // retains bytes the next read() would overwrite.
+        asm.add(Uint8List.fromList(buf.asTypedList(n)));
       } else if (n == 0) {
-        // EOF: the write ends are all closed. Flush any trailing partial.
-        _flushPartial(stream, partial);
+        asm.flush(); // EOF: all write ends closed
         if (stream == StdStream.out) {
           _outDone = true;
         } else {
@@ -152,30 +163,9 @@ class _Reader {
         }
         return;
       } else {
-        if (errno == eagain) return; // fully drained
-        return; // hard error — treat as done-ish; loop exit handles it
+        return; // EAGAIN (fully drained) or hard error
       }
     }
-  }
-
-  /// Split [chunk] on 0x0A into lines, carrying [partial] across reads. `\n`
-  /// never occurs inside a multi-byte UTF-8 sequence, so this is codepoint-safe.
-  void _assemble(Uint8List chunk, StdStream stream, BytesBuilder partial) {
-    var start = 0;
-    for (var i = 0; i < chunk.length; i++) {
-      if (chunk[i] == 0x0A) {
-        partial.add(Uint8List.sublistView(chunk, start, i));
-        _emitLine(partial.takeBytes(), stream);
-        start = i + 1;
-      }
-    }
-    if (start < chunk.length) {
-      partial.add(Uint8List.sublistView(chunk, start));
-    }
-  }
-
-  void _flushPartial(StdStream stream, BytesBuilder partial) {
-    if (partial.isNotEmpty) _emitLine(partial.takeBytes(), stream);
   }
 
   void _emitLine(Uint8List bytes, StdStream stream) {
@@ -232,8 +222,8 @@ class _Reader {
   /// Final message: flush partials, drain the ring regardless of credit (bounded
   /// by backlog), then send Done.
   void _finish() {
-    _flushPartial(StdStream.out, _outPartial);
-    _flushPartial(StdStream.err, _errPartial);
+    _outAsm.flush();
+    _errAsm.flush();
     _flushMirror();
     if (_ring.isNotEmpty) {
       cfg.toMain.send(ReaderBatch(
