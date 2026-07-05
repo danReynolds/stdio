@@ -45,8 +45,21 @@ final class StdioRedirect {
 }
 
 /// File-descriptor-level capture of stdout/stderr — including native/FFI and
-/// inherited-subprocess output. See the class methods for the three entry
-/// points. POSIX only.
+/// inherited-subprocess output. POSIX only.
+///
+/// Three entry points, following the `Process.start`/`Process.run` pattern:
+/// [start] returns a live session handle, [capture] is the scoped one-shot,
+/// and [redirectToFile] reroutes fd 1/2 with no capture at all.
+///
+/// ```dart
+/// final capture = await StdioCapture.start(historyLines: 8192);
+///
+/// capture.history.forEach(paint);            // lines from before you subscribed
+/// final sub = capture.output.listen(paint);  // live from now on
+/// capture.terminal.writeln('frame…');        // draw to the REAL terminal
+///
+/// final result = await capture.stop();       // restore fd 1/2, full transcript
+/// ```
 final class StdioCapture {
   StdioCapture._({
     required int savedFd,
@@ -60,7 +73,7 @@ final class StdioCapture {
     required Isolate isolate,
     required ReceivePort fromReader,
     required this.terminal,
-    required int backlogLines,
+    required int historyLines,
   })  : _savedFd = savedFd,
         _savedErrFd = savedErrFd,
         _outWriteFd = outWriteFd,
@@ -71,7 +84,7 @@ final class StdioCapture {
         _controlWriteFd = controlWriteFd,
         _isolate = isolate,
         _fromReader = fromReader,
-        _backlogLines = backlogLines;
+        _historyLines = historyLines;
 
   // A single process-global fd redirect at a time (§6.2). Main-isolate scoped.
   static bool _busy = false;
@@ -86,7 +99,7 @@ final class StdioCapture {
   final int _controlWriteFd;
   final Isolate _isolate;
   final ReceivePort _fromReader;
-  final int _backlogLines;
+  final int _historyLines;
 
   /// The real terminal, for rendering (the saved dup of fd 1). Invalid once
   /// [stop] completes — the controller closes the saved fd.
@@ -120,41 +133,56 @@ final class StdioCapture {
   /// stderr lines only (exact within-stream order).
   Stream<CapturedLine> get stderr => _err.stream;
 
-  /// Both streams, interleaved (approximate cross-stream order). Each line
-  /// carries its [CapturedLine.stream] tag.
-  StreamSubscription<CapturedLine> listen(
-    void Function(CapturedLine line)? onData, {
-    Function? onError,
-    void Function()? onDone,
-    bool? cancelOnError,
-  }) =>
-      _combined.stream.listen(onData,
-          onError: onError, onDone: onDone, cancelOnError: cancelOnError);
+  /// Both streams interleaved; each line carries its [CapturedLine.stream]
+  /// tag. Cross-stream order is approximate (the two-pipe tag/order trade —
+  /// [redirectToFile] is the exact-merged-order mode). Broadcast, same
+  /// no-pause caveat as [stdout].
+  Stream<CapturedLine> get output => _combined.stream;
 
-  /// A snapshot of retained lines (bounded to `backlogLines`, drop-oldest).
+  /// A snapshot of the retained lines, both streams, delivery order — at most
+  /// `historyLines` of them (beyond that the oldest were dropped and counted
+  /// in [droppedLines]/[droppedBytes]).
   List<CapturedLine> get history => List<CapturedLine>.unmodifiable(_history);
 
   /// Lines dropped under backpressure (in the reader isolate).
   int get droppedLines => _droppedLines;
   int get droppedBytes => _droppedBytes;
 
+  /// True until [stop] is first called. Note a capture can be active but
+  /// degraded — see [readerError].
   bool get isActive => _finishing == null;
 
-  /// Non-null if the reader isolate died with an error. Line delivery has
-  /// stopped when this is set; [stop] still restores fd 1/2 normally.
+  /// Non-null if the reader isolate died mid-session. When that happens the
+  /// line streams close (listeners get onDone) and delivery stops; [stop]
+  /// still restores fd 1/2 normally.
   Object? get readerError => _readerError;
 
-  /// Redirect fd 1/2 into the capture and drain off-isolate. Throws [StateError]
-  /// if a capture/redirect is already active (fd redirection is process-global).
+  /// Redirect fd 1/2 into this capture until [stop], returning the live
+  /// session handle everything else is called on.
+  ///
+  /// [historyLines] bounds how many lines the capture retains — the [history]
+  /// snapshot and the internal buffer feeding it. Beyond that, the oldest
+  /// lines are dropped and counted in [droppedLines]/[droppedBytes]. It does
+  /// NOT limit the live streams: [stdout]/[stderr]/[output] subscribers see
+  /// every line that isn't dropped under overload.
+  ///
+  /// [mirrorToFile] appends every captured line to a durable file, written by
+  /// the reader isolate itself — so the log survives a stalled main isolate
+  /// and (up to the in-flight tail) an abrupt exit. An unopenable path throws
+  /// here, with the redirect rolled back.
+  ///
+  /// [classify] runs once per untagged line; a non-null return becomes that
+  /// line's [CapturedLine.source].
+  ///
+  /// Throws [StateError] if a capture/redirect is already active — fd
+  /// redirection is process-global, one at a time.
   static Future<StdioCapture> start({
-    int backlogLines = 4096,
+    int historyLines = 4096,
     io.File? mirrorToFile,
     String? Function(CapturedLine line)? classify,
   }) async {
-    if (backlogLines < 1) {
-      throw ArgumentError.value(
-          backlogLines, 'backlogLines', 'must be >= 1 (bounds retention AND '
-          'the reader ring — 0 would silently drop every line)');
+    if (historyLines < 1) {
+      throw ArgumentError.value(historyLines, 'historyLines', 'must be >= 1');
     }
     if (_busy) {
       throw StateError(
@@ -234,7 +262,7 @@ final class StdioCapture {
           errReadFd: errR,
           controlReadFd: ctrlR,
           toMain: fromReader.sendPort,
-          backlogLines: backlogLines,
+          historyLines: historyLines,
           mirrorFd: mirrorFd,
         ),
         onError: fromReader.sendPort,
@@ -254,7 +282,7 @@ final class StdioCapture {
         isolate: isolate,
         fromReader: fromReader,
         terminal: FdTerminalSink(savedOut),
-        backlogLines: backlogLines,
+        historyLines: historyLines,
       );
       cap._classify = classify;
       fromReader.listen(cap._onReaderMessage);
@@ -283,6 +311,17 @@ final class StdioCapture {
       // not be silent, nor leave stop() waiting out its drain timeout.
       if (msg is List && msg.isNotEmpty) _readerError ??= msg.first;
       if (!_readerDone.isCompleted) _readerDone.complete();
+      if (_finishing == null) {
+        // The reader died OUTSIDE a stop(): fds are still redirected but
+        // nothing is draining. Be loud — record why and close the line
+        // streams so listeners observe onDone instead of silence. stop()
+        // still restores normally.
+        _readerError ??=
+            StdioCaptureException('reader isolate exited unexpectedly');
+        _combined.close();
+        _out.close();
+        _err.close();
+      }
       return;
     }
     _droppedLines = msg.droppedLines;
@@ -297,16 +336,24 @@ final class StdioCapture {
     if (msg.done && !_readerDone.isCompleted) _readerDone.complete();
   }
 
-  /// Add a line to history + the streams, applying the classifier if the line is
-  /// untagged. Shared by the reader path and subprocess adoption.
+  /// Add a line to history + the streams, applying the classifier if the line
+  /// is untagged. Shared by the reader path and subprocess adoption.
   void _emit(CapturedLine l) {
     if (_closed) return; // a late adopt()-stream event after the snapshot
-    if (l.source == null && _classify != null) l.source = _classify!(l);
-    _history.add(l);
-    if (_history.length > _backlogLines) _history.removeFirst();
-    if (!_combined.isClosed) _combined.add(l);
-    final c = l.stream == StdStream.out ? _out : _err;
-    if (!c.isClosed) c.add(l);
+    var line = l;
+    if (line.source == null && _classify != null) {
+      final tag = _classify!(line);
+      if (tag != null) {
+        // CapturedLine is immutable; tagging takes a copy.
+        line = CapturedLine(
+            bytes: line.bytes, stream: line.stream, at: line.at, source: tag);
+      }
+    }
+    _history.add(line);
+    if (_history.length > _historyLines) _history.removeFirst();
+    if (!_combined.isClosed) _combined.add(line);
+    final c = line.stream == StdStream.out ? _out : _err;
+    if (!c.isClosed) c.add(line);
   }
 
   /// Spawn a child, tagging its stdout/stderr with [source] and merging them
@@ -320,9 +367,14 @@ final class StdioCapture {
   Future<io.Process> startProcess(String executable, List<String> arguments,
       {required String source,
       String? workingDirectory,
-      Map<String, String>? environment}) async {
+      Map<String, String>? environment,
+      bool includeParentEnvironment = true,
+      bool runInShell = false}) async {
     final proc = await io.Process.start(executable, arguments,
-        workingDirectory: workingDirectory, environment: environment);
+        workingDirectory: workingDirectory,
+        environment: environment,
+        includeParentEnvironment: includeParentEnvironment,
+        runInShell: runInShell);
     adopt(proc, source: source);
     return proc;
   }
@@ -336,7 +388,7 @@ final class StdioCapture {
 
   void _pipeChild(Stream<List<int>> stream, StdStream s, String source) {
     final asm = LineAssembler((bytes) => _emit(CapturedLine(
-        rawBytes: bytes, stream: s, at: DateTime.now(), source: source)));
+        bytes: bytes, stream: s, at: DateTime.now(), source: source)));
     stream.listen(
       (chunk) => asm.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk)),
       onDone: asm.flush,
@@ -351,10 +403,12 @@ final class StdioCapture {
     }
   }
 
-  /// Restore fd 1/2 and tear down. Idempotent and concurrent-safe: every call
-  /// awaits the same teardown. See §7.3 for the ordering. After this returns,
-  /// [terminal]/[terminalStdout] are invalid (their fd is closed).
-  Future<void> stop() => _finish();
+  /// Restore fd 1/2 and tear down, returning the full transcript — the same
+  /// [Captured] a scoped [capture] call yields. Idempotent and
+  /// concurrent-safe: every call awaits the same teardown and gets the same
+  /// snapshot. After this returns, [terminal]/[terminalStdout] are invalid
+  /// (their fd is closed). See §7.3 for the teardown ordering.
+  Future<Captured> stop() async => Captured(await _finish());
 
   Future<List<CapturedLine>> _finish() => _finishing ??= _doFinish();
 
@@ -403,27 +457,38 @@ final class StdioCapture {
     return snapshot;
   }
 
-  /// Scoped capture — runs [body] with fd 1/2 captured and returns everything,
-  /// restoring after (INCLUDING when [body] throws — the redirect is released
-  /// and the original exception propagates). Built on [start]; process-global
-  /// (§6.2).
-  static Future<Captured> collect(FutureOr<void> Function() body) async {
+  /// Scoped capture: the window is exactly the execution of [body].
+  ///
+  /// Desugars to `start()` → `await body()` → `stop()` in a finally — so fd
+  /// 1/2 are restored even when [body] throws (the exception then
+  /// propagates), and everything written before [body]'s future completes is
+  /// guaranteed in the result (the teardown drains the pipes to EOF).
+  ///
+  /// The `Process.run` to [start]'s `Process.start`: use this when the
+  /// capture doesn't outlive one call — tests, wrapping a noisy init.
+  static Future<Captured> capture(FutureOr<void> Function() body) async {
     final cap = await StdioCapture.start();
     var lines = const <CapturedLine>[];
     try {
       await body();
     } finally {
-      // No settling delay needed: stop() closes the pipe write ends, and the
-      // reader drains to EOF — everything written before this point is
-      // guaranteed captured.
       lines = await cap._finish();
     }
     return Captured(lines);
   }
 
-  /// Direct redirect of fd 1/2 to a file — no pipe, no draining, faithful merged
-  /// order. For headless nodes that just want native noise in a log.
-  static Future<StdioRedirect> divertToFile(io.File file,
+  /// Reroute fd 1/2 straight to [file] — a *move*, not a tee: the file
+  /// replaces the terminal, nothing appears on screen, and the bytes never
+  /// come back into your program (no streams, no history, no isolate — the
+  /// kernel does all the work). It's `prog >log 2>&1` done from inside the
+  /// process, reversed by [StdioRedirect.stop].
+  ///
+  /// The one mode with EXACT merged ordering (both fds share one file
+  /// description), and it keeps working even if every isolate stalls. For
+  /// headless services that just need native noise in a log; if you want to
+  /// *observe* output, use [start] (its `mirrorToFile` is the tee-like
+  /// duplicate).
+  static Future<StdioRedirect> redirectToFile(io.File file,
       {bool append = true}) async {
     if (_busy) {
       throw StateError('stdio_capture: a capture/redirect is already active.');

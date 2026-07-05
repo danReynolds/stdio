@@ -3,10 +3,12 @@
 /// objects. POSIX (Linux + macOS).
 ///
 /// See [StdioCapture] for the three entry points: [StdioCapture.start] (a
-/// long-lived controller), [StdioCapture.collect] (scoped), and
-/// [StdioCapture.divertToFile] (direct redirect, no draining).
+/// long-lived session handle), [StdioCapture.capture] (scoped, returns the
+/// transcript), and [StdioCapture.redirectToFile] (reroute fd 1/2 to a file,
+/// no capture).
 library;
 
 export 'src/captured_line.dart' show CapturedLine, StdStream;
 export 'src/stdio_capture_base.dart' show Captured, StdioCapture, StdioRedirect;
-export 'src/terminal_sink.dart' show StdoutTerminalSink, TerminalSink;
+export 'src/terminal_sink.dart'
+    show FdTerminalSink, StdoutTerminalSink, TerminalSink;

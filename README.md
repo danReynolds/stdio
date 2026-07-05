@@ -35,33 +35,42 @@ final capture = await StdioCapture.start();
 capture.history.forEach(render);
 capture.stdout.listen(render);   // stdout lines
 capture.stderr.listen(render);   // stderr lines
-capture.listen(render);          // both, interleaved (each line keeps .stream)
+capture.output.listen(render);   // both, interleaved (each line keeps .stream)
 
 // Render your UI through the REAL terminal (the saved dup of fd 1):
 myDriver.write(frame, to: capture.terminal);        // a TerminalSink (IOSink)
 // …or, for an API that wants a concrete Stdout:
 myDriver.write(frame, to: capture.terminalStdout);
 
-await capture.stop();            // restore fd 1/2
+final result = await capture.stop();   // restore fd 1/2, returns the transcript
 ```
 
 ### Scoped (tests / the wurlitzer ergonomic)
 
 ```dart
-final cap = await StdioCapture.collect(() {
+final cap = await StdioCapture.capture(() {
   greetFromC();     // C printf → write(1) directly
   print('and dart');
 });
 expect(cap.out, contains('Hello from C'));   // the byte no other Dart package catches
 ```
 
+The capture window is exactly the execution of the body — `start()` →
+`await body()` → `stop()` in a finally, so fd 1/2 are restored even when the
+body throws.
+
 ### Direct redirect to a file (a headless service)
 
 ```dart
-final divert = await StdioCapture.divertToFile(File('service.log'));
+final redirect = await StdioCapture.redirectToFile(File('service.log'));
 // … run the noisy code … native tsnet/sqlite output now goes to the file …
-await divert.stop();
+await redirect.stop();
 ```
+
+A *move*, not a tee: the file replaces the terminal and the bytes never come
+back into your program — no streams, no history, no overhead (the kernel does
+the work), and the one mode with exact merged byte order. If you want a file
+copy *and* programmatic access, that's `start(mirrorToFile: …)`.
 
 ### Subprocess tagging & durable mirror
 
@@ -85,13 +94,13 @@ final child = await capture.startProcess('worker', ['--serve'], source: 'worker'
   `abort()`, or a segfault — but fd redirection is process-local, so a crash
   leaves the parent shell untouched.
 - **One capture at a time.** fd redirection is process-global; a second
-  `start()`/`collect()` throws `StateError`. Tests using `collect()` must run
+  `start()`/`capture()` throws `StateError`. Tests using `capture()` must run
   serially if they assert on process stdio.
 - **Tag XOR exact cross-stream order.** Two pipes keep the stdout/stderr tag, so
   `stdout`/`stderr` are exact within each stream but the combined `listen` is
   only *approximately* interleaved across streams. Faithful byte-order is
   available where it's natural — `divertToFile` merges both onto one file.
-- **Bytes are the source of truth.** `CapturedLine.rawBytes` is primary; `.text`
+- **Bytes are the source of truth.** `CapturedLine.bytes` is primary; `.text`
   is a lazily-decoded (replacement-safe) convenience.
 - **Tagged children ride the main event loop.** `startProcess`/`adopt` deliver
   through Dart streams on the main isolate — if main stalls, the *child* gets

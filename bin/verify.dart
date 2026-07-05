@@ -33,8 +33,8 @@ void check(bool ok, String label) {
 }
 
 Future<void> main() async {
-  stderr.writeln('== A. collect() captures native + Dart, tagged ==');
-  final a = await StdioCapture.collect(() {
+  stderr.writeln('== A. capture() captures native + Dart, tagged ==');
+  final a = await StdioCapture.capture(() {
     print('dart-print-out');
     stderr.writeln('dart-stderr-err');
     nativeWrite(1, 'native-out\n');
@@ -50,21 +50,31 @@ Future<void> main() async {
   stderr.writeln('== B. start()/stop() controller: streams + history + restore ==');
   final b = await StdioCapture.start();
   final bOut = <String>[];
+  final bAll = <CapturedLine>[];
   b.stdout.listen((l) => bOut.add(l.text));
+  b.output.listen(bAll.add);
   print('controller-out-line');
   nativeWrite(2, 'controller-err-line\n');
   await Future<void>.delayed(const Duration(milliseconds: 80));
-  await b.stop();
+  final bResult = await b.stop();
   check(b.history.any((l) => l.text.contains('controller-out-line')),
       'history has the stdout line');
   check(b.history.any((l) => l.text.contains('controller-err-line')),
       'history has the stderr line');
+  check(
+      bAll.any((l) => l.stream == StdStream.out) &&
+          bAll.any((l) => l.stream == StdStream.err),
+      'output stream carried both, tagged');
+  check(
+      bResult.out.contains('controller-out-line') &&
+          bResult.err.contains('controller-err-line'),
+      'stop() returned the transcript (Captured)');
   check(!b.isActive, 'isActive false after stop');
 
   stderr.writeln('== C. storm: >pipe-capacity while main is busy → no deadlock ==');
   const stormN = 40000;
   final sw = Stopwatch()..start();
-  final c = await StdioCapture.collect(() {
+  final c = await StdioCapture.capture(() {
     for (var i = 0; i < stormN; i++) {
       nativeWrite(1, 'storm-line-$i-padding-padding-padding-padding\n');
     }
@@ -85,10 +95,10 @@ Future<void> main() async {
   await d.stop();
   check(threw, 'second start() threw StateError');
 
-  stderr.writeln('== E. divertToFile writes both streams to a file ==');
+  stderr.writeln('== E. redirectToFile writes both streams to a file ==');
   final tmp = File('${Directory.systemTemp.path}/stdio_capture_verify.log');
   if (tmp.existsSync()) tmp.deleteSync();
-  final div = await StdioCapture.divertToFile(tmp);
+  final div = await StdioCapture.redirectToFile(tmp);
   print('file-out-line');
   nativeWrite(2, 'file-err-line\n');
   await stdout.flush();
@@ -154,10 +164,10 @@ Future<void> main() async {
   check(iCap.history.any((l) => l.text == 'snow☃man'),
       'codepoint reassembled across the read boundary');
 
-  stderr.writeln('== J. collect() restores + releases even when body throws ==');
+  stderr.writeln('== J. capture() restores + releases even when body throws ==');
   var jThrew = false;
   try {
-    await StdioCapture.collect(() {
+    await StdioCapture.capture(() {
       print('pre-throw-line');
       throw StateError('boom');
     });
@@ -168,7 +178,7 @@ Future<void> main() async {
   // If the redirect leaked, this start() would throw StateError(busy); if fd
   // 1/2 still pointed at the dead pipes, the capture below would misbehave —
   // and the harness's own post-throw stderr reporting would vanish.
-  final j2 = await StdioCapture.collect(() => print('post-throw-line'));
+  final j2 = await StdioCapture.capture(() => print('post-throw-line'));
   check(j2.out.contains('post-throw-line'),
       'capture fully usable again after the throw');
 
@@ -183,7 +193,7 @@ Future<void> main() async {
     kThrew = true;
   }
   check(kThrew, 'start() threw instead of killing the reader silently');
-  final k2 = await StdioCapture.collect(
+  final k2 = await StdioCapture.capture(
       () => nativeWrite(1, 'after-mirror-fail\n'));
   check(k2.out.contains('after-mirror-fail'),
       'rolled back cleanly: capture usable again');
@@ -201,7 +211,7 @@ Future<void> main() async {
   stderr.writeln('== M. argument validation ==');
   var mThrew = false;
   try {
-    await StdioCapture.start(backlogLines: 0);
+    await StdioCapture.start(historyLines: 0);
   } on ArgumentError {
     mThrew = true;
   }
@@ -212,7 +222,7 @@ Future<void> main() async {
     mReusable = true;
   } catch (_) {}
   check(mThrew && mReusable,
-      'backlogLines: 0 → ArgumentError, and _busy not leaked by the throw');
+      'historyLines: 0 → ArgumentError, and _busy not leaked by the throw');
 
   // This must appear on the REAL terminal — proof restore worked.
   stderr.writeln('== restore proof: this line is on the real terminal ==');

@@ -3,7 +3,7 @@ description: >-
   File-descriptor-level capture of stdout/stderr for Dart — including output from
   native/FFI code and inherited subprocesses that bypass Dart's stream objects.
   POSIX (Linux + macOS).
-version: 0.1.0
+version: 0.2.0
 repository: https://github.com/danReynolds/stdio_capture
 publish_to: none
 

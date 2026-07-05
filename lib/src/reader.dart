@@ -25,7 +25,7 @@ final class ReaderConfig {
     required this.errReadFd,
     required this.controlReadFd,
     required this.toMain,
-    required this.backlogLines,
+    required this.historyLines,
     required this.mirrorFd,
     this.initialCredit = 8,
     this.batchMaxLines = 512,
@@ -36,7 +36,7 @@ final class ReaderConfig {
   final int errReadFd;
   final int controlReadFd;
   final SendPort toMain;
-  final int backlogLines;
+  final int historyLines;
 
   /// Mirror-file fd, already opened (and validated) by the controller on the
   /// main isolate — so a bad path throws at start() instead of killing this
@@ -212,12 +212,12 @@ class _Reader {
         ..add(bytes)
         ..addByte(0x0A);
     }
-    final line = CapturedLine(rawBytes: bytes, stream: stream, at: DateTime.now());
+    final line = CapturedLine(bytes: bytes, stream: stream, at: DateTime.now());
     _ring.add(line);
-    if (_ring.length > cfg.backlogLines) {
+    if (_ring.length > cfg.historyLines) {
       final dropped = _ring.removeFirst();
       _droppedLines++;
-      _droppedBytes += dropped.rawBytes.length;
+      _droppedBytes += dropped.bytes.length;
     }
   }
 
