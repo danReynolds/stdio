@@ -442,18 +442,23 @@ final class StdioCapture {
   ///
   /// No-op if already paused. Throws [StateError] after [stop].
   Future<void> pause() async {
-    if (_closed || _finishing != null) {
-      throw StateError('stdio: capture is stopped.');
-    }
+    _checkLive();
     if (_paused) return;
+    // Bytes written up to the completion of these flushes belong to the
+    // capture (fd 1/2 still point at the pipes); the pause takes effect when
+    // this future completes.
     try {
       await io.stdout.flush();
     } catch (_) {}
     try {
       await io.stderr.flush();
     } catch (_) {}
-    dup2(_savedFd, 1);
-    dup2(_savedErrFd, 2);
+    // Re-check after the async gap: a concurrent stop() may have begun
+    // teardown while we awaited — its restore already happened and the saved
+    // fds may be closed, so redirecting now would corrupt descriptor state.
+    _checkLive();
+    _dup2Checked(_savedFd, 1, 'pause');
+    _dup2Checked(_savedErrFd, 2, 'pause');
     _paused = true;
   }
 
@@ -463,9 +468,7 @@ final class StdioCapture {
   ///
   /// No-op if not paused. Throws [StateError] after [stop].
   Future<void> resume() async {
-    if (_closed || _finishing != null) {
-      throw StateError('stdio: capture is stopped.');
-    }
+    _checkLive();
     if (!_paused) return;
     try {
       await io.stdout.flush();
@@ -473,9 +476,25 @@ final class StdioCapture {
     try {
       await io.stderr.flush();
     } catch (_) {}
-    dup2(_outWriteFd, 1);
-    dup2(_errWriteFd, 2);
+    // Re-check after the async gap (see pause()): stop() closes the pipe
+    // write ends, so a late re-redirect would target dead descriptors.
+    _checkLive();
+    _dup2Checked(_outWriteFd, 1, 'resume');
+    _dup2Checked(_errWriteFd, 2, 'resume');
     _paused = false;
+  }
+
+  void _checkLive() {
+    if (_closed || _finishing != null) {
+      throw StateError('stdio: capture is stopped.');
+    }
+  }
+
+  static void _dup2Checked(int from, int to, String op) {
+    if (dup2(from, to) < 0) {
+      throw StdioCaptureException(
+          'stdio: $op dup2($from, $to) failed: errno=$errno');
+    }
   }
 
   /// Restore fd 1/2 and tear down, returning the full transcript — the same
@@ -517,6 +536,7 @@ final class StdioCapture {
 
     final snapshot = List<CapturedLine>.of(_history);
     _closed = true;
+    _paused = false;
 
     // (4) close read ends + control + saved fds; kill the isolate (a no-op if
     // it exited; the backstop if it's stuck); close ports + streams.
