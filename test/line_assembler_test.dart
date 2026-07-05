@@ -58,4 +58,17 @@ void main() {
     expect(run((a) => a.add(b(''))), isEmpty);
     expect(run((a) => a.flush()), isEmpty);
   });
+
+  test('retains no reference to the chunk after add() returns', () {
+    // Locks the contract the reader isolate depends on: it hands add() a view
+    // over its reused native read buffer, so both the emitted lines AND the
+    // carried partial must be copies, unaffected when the buffer is recycled.
+    final lines = <String>[];
+    final a = LineAssembler((bytes) => lines.add(utf8.decode(bytes)));
+    final chunk = b('whole-line\npartial');
+    a.add(chunk);
+    chunk.fillRange(0, chunk.length, 0x58 /* 'X' — simulate buffer reuse */);
+    a.flush();
+    expect(lines, ['whole-line', 'partial']);
+  });
 }

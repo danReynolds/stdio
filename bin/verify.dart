@@ -154,6 +154,66 @@ Future<void> main() async {
   check(iCap.history.any((l) => l.text == 'snow☃man'),
       'codepoint reassembled across the read boundary');
 
+  stderr.writeln('== J. collect() restores + releases even when body throws ==');
+  var jThrew = false;
+  try {
+    await StdioCapture.collect(() {
+      print('pre-throw-line');
+      throw StateError('boom');
+    });
+  } on StateError catch (e) {
+    jThrew = e.message == 'boom';
+  }
+  check(jThrew, 'body exception propagated to the caller');
+  // If the redirect leaked, this start() would throw StateError(busy); if fd
+  // 1/2 still pointed at the dead pipes, the capture below would misbehave —
+  // and the harness's own post-throw stderr reporting would vanish.
+  final j2 = await StdioCapture.collect(() => print('post-throw-line'));
+  check(j2.out.contains('post-throw-line'),
+      'capture fully usable again after the throw');
+
+  stderr.writeln('== K. bad mirror path fails cleanly at start() ==');
+  // An existing FILE as the mirror's parent "directory" → open must fail.
+  final kBlocker = File('${Directory.systemTemp.path}/stdio_capture_blocker')
+    ..writeAsStringSync('x');
+  var kThrew = false;
+  try {
+    await StdioCapture.start(mirrorToFile: File('${kBlocker.path}/nope.log'));
+  } catch (_) {
+    kThrew = true;
+  }
+  check(kThrew, 'start() threw instead of killing the reader silently');
+  final k2 = await StdioCapture.collect(
+      () => nativeWrite(1, 'after-mirror-fail\n'));
+  check(k2.out.contains('after-mirror-fail'),
+      'rolled back cleanly: capture usable again');
+  kBlocker.deleteSync();
+
+  stderr.writeln('== L. stop() is idempotent + concurrent-safe ==');
+  final l = await StdioCapture.start();
+  nativeWrite(1, 'l-line\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await Future.wait([l.stop(), l.stop()]); // concurrent
+  await l.stop(); // and again after completion
+  check(l.history.any((x) => x.text == 'l-line'),
+      'double/concurrent stop OK, history intact');
+
+  stderr.writeln('== M. argument validation ==');
+  var mThrew = false;
+  try {
+    await StdioCapture.start(backlogLines: 0);
+  } on ArgumentError {
+    mThrew = true;
+  }
+  var mReusable = false;
+  try {
+    final m2 = await StdioCapture.start();
+    await m2.stop();
+    mReusable = true;
+  } catch (_) {}
+  check(mThrew && mReusable,
+      'backlogLines: 0 → ArgumentError, and _busy not leaked by the throw');
+
   // This must appear on the REAL terminal — proof restore worked.
   stderr.writeln('== restore proof: this line is on the real terminal ==');
   stderr.writeln(_failures == 0

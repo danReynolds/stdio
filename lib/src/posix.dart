@@ -28,10 +28,18 @@ final int Function(int, Pointer<Uint8>, int) _write = _libc.lookupFunction<
     int Function(int, Pointer<Uint8>, int)>('write');
 final int Function(int) _close =
     _libc.lookupFunction<Int32 Function(Int32), int Function(int)>('close');
-// int fcntl(int fd, int cmd, int arg) — variadic in C, but our calls pass one
-// int arg, so a fixed 3-arg signature is ABI-correct here.
-final int Function(int, int, int) _fcntl = _libc.lookupFunction<
-    Int32 Function(Int32, Int32, Int32), int Function(int, int, int)>('fcntl');
+// int fcntl(int fd, int cmd, ...) — VARIADIC in C. On arm64 macOS variadic
+// args are passed on the stack while a fixed-arity FFI signature passes them
+// in registers, so the callee reads garbage — F_SETFL would set random flags
+// (observed: O_NONBLOCK silently not taking, turning the reader's non-blocking
+// drains into blocking reads). Same ABI trap as open()'s mode arg. The reads
+// (F_GETFL/F_GETFD) take no third arg, so a fixed 2-arg binding is correct;
+// the writes go through a VarArgs binding that uses the real varargs ABI.
+final int Function(int, int) _fcntlGet = _libc.lookupFunction<
+    Int32 Function(Int32, Int32), int Function(int, int)>('fcntl');
+final int Function(int, int, int) _fcntlSet = _libc.lookupFunction<
+    Int32 Function(Int32, Int32, VarArgs<(Int32,)>),
+    int Function(int, int, int)>('fcntl');
 // int open(const char* path, int flags, mode_t mode)
 final int Function(Pointer<Utf8>, int, int) _open = _libc.lookupFunction<
     Int32 Function(Pointer<Utf8>, Int32, Uint32),
@@ -43,9 +51,10 @@ final int Function(int) _isatty =
 final int Function(Pointer<PollFd>, int, int) _poll = _libc.lookupFunction<
     Int32 Function(Pointer<PollFd>, IntPtr, Int32),
     int Function(Pointer<PollFd>, int, int)>('poll');
-// int ioctl(int fd, unsigned long request, void* arg)
+// int ioctl(int fd, unsigned long request, ...) — variadic like fcntl; the
+// pointer arg must travel via the varargs ABI (see the fcntl note above).
 final int Function(int, int, Pointer<Void>) _ioctl = _libc.lookupFunction<
-    Int32 Function(Int32, UnsignedLong, Pointer<Void>),
+    Int32 Function(Int32, UnsignedLong, VarArgs<(Pointer<Void>,)>),
     int Function(int, int, Pointer<Void>)>('ioctl');
 
 // errno is thread-local; these return a pointer to it. Different symbol per OS.
@@ -90,6 +99,7 @@ final int eagain = _mac ? 35 : 11; // EAGAIN / EWOULDBLOCK
 
 // poll() event flags — identical on Linux + macOS.
 const int pollIn = 0x0001;
+const int pollOut = 0x0004;
 const int pollErr = 0x0008;
 const int pollHup = 0x0010;
 const int pollNval = 0x0020;
@@ -150,13 +160,32 @@ void fdWriteAll(int fd, List<int> bytes) {
       } else if (w < 0 && errno == eintr) {
         continue;
       } else if (w < 0 && errno == eagain) {
-        continue; // blocking fd shouldn't EAGAIN, but be defensive
+        // The target is non-blocking and full (a TUI driver may have flipped
+        // the tty to O_NONBLOCK — the flag lives on the shared open file
+        // description, so our saved dup sees it too). Busy-retrying would spin
+        // a core; block in poll() until writable instead.
+        _awaitWritable(fd);
       } else {
         throw StdioCaptureException('write(fd=$fd) failed: errno=$errno');
       }
     }
   } finally {
     malloc.free(buf);
+  }
+}
+
+/// Blocks until [fd] is writable. Used by [fdWriteAll] when a non-blocking
+/// target returns EAGAIN.
+void _awaitWritable(int fd) {
+  final p = malloc<PollFd>();
+  try {
+    p.ref
+      ..fd = fd
+      ..events = pollOut
+      ..revents = 0;
+    _retry(() => _poll(p, 1, -1));
+  } finally {
+    malloc.free(p);
   }
 }
 
@@ -177,19 +206,31 @@ void fdWriteAll(int fd, List<int> bytes) {
 /// Sets the close-on-exec flag so children don't inherit [fd]. We set this on
 /// our saved-terminal fd and all pipe fds; the redirected fd 1/2 deliberately
 /// do NOT get it (children should inherit them, that's how subprocess capture
-/// works — dup2 clears CLOEXEC on its target).
+/// works — dup2 clears CLOEXEC on its target). Best-effort: a leak into a
+/// child is a hygiene issue, not a correctness one.
 void setCloexec(int fd) {
-  final flags = _fcntl(fd, fGetfd, 0);
-  if (flags < 0) return; // best-effort
-  _fcntl(fd, fSetfd, flags | fdCloexec);
+  final flags = _fcntlGet(fd, fGetfd);
+  if (flags < 0) return;
+  _fcntlSet(fd, fSetfd, flags | fdCloexec);
 }
 
-/// Adds O_NONBLOCK to [fd]'s file status flags so reads return EAGAIN instead of
-/// blocking. Used on the reader's pipe read ends so it can fully drain.
+/// Adds O_NONBLOCK to [fd]'s file status flags so reads return EAGAIN instead
+/// of blocking, and VERIFIES it took. Throws on failure: the reader's drain
+/// loop is only correct on non-blocking fds (a blocking read() would stall the
+/// whole loop and reintroduce the writer deadlock this package exists to
+/// prevent), so silent failure here must be fatal, not best-effort.
 void setNonBlocking(int fd) {
-  final flags = _fcntl(fd, fGetfl, 0);
-  if (flags < 0) return; // best-effort
-  _fcntl(fd, fSetfl, flags | oNonBlock);
+  final flags = _fcntlGet(fd, fGetfl);
+  if (flags < 0) {
+    throw StdioCaptureException('fcntl(F_GETFL, fd=$fd) failed: errno=$errno');
+  }
+  _fcntlSet(fd, fSetfl, flags | oNonBlock);
+  final after = _fcntlGet(fd, fGetfl);
+  if (after < 0 || (after & oNonBlock) == 0) {
+    throw StdioCaptureException(
+        'fcntl(F_SETFL, fd=$fd) did not set O_NONBLOCK '
+        '(flags $flags -> $after, errno=$errno)');
+  }
 }
 
 /// Opens [path] for writing (append or truncate), returning its fd.

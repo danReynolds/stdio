@@ -7,6 +7,7 @@
 // loop blocks in poll() and never services an isolate event loop: byte 1 = a
 // spent-batch credit, byte 0 = stop. Reader → main is the SendPort.
 
+import 'dart:collection';
 import 'dart:ffi';
 import 'dart:isolate';
 import 'dart:typed_data';
@@ -25,7 +26,7 @@ final class ReaderConfig {
     required this.controlReadFd,
     required this.toMain,
     required this.backlogLines,
-    required this.mirrorPath,
+    required this.mirrorFd,
     this.initialCredit = 8,
     this.batchMaxLines = 512,
     this.pollTimeoutMs = 50,
@@ -36,7 +37,11 @@ final class ReaderConfig {
   final int controlReadFd;
   final SendPort toMain;
   final int backlogLines;
-  final String? mirrorPath;
+
+  /// Mirror-file fd, already opened (and validated) by the controller on the
+  /// main isolate — so a bad path throws at start() instead of killing this
+  /// isolate. fds are process-global; the reader owns and closes it.
+  final int? mirrorFd;
   final int initialCredit;
   final int batchMaxLines;
   final int pollTimeoutMs;
@@ -71,7 +76,10 @@ class _Reader {
       LineAssembler((b) => _emitLine(b, StdStream.out));
   late final LineAssembler _errAsm =
       LineAssembler((b) => _emitLine(b, StdStream.err));
-  final _ring = <CapturedLine>[];
+  // A ListQueue so drop-oldest and batch extraction are O(1) per line — a
+  // plain List's removeAt(0)/removeRange(0, n) shifts the whole backlog on
+  // every operation once the ring is saturated.
+  final _ring = ListQueue<CapturedLine>();
   final _mirrorBuf = BytesBuilder();
 
   int _credit = 0;
@@ -84,15 +92,16 @@ class _Reader {
 
   void run() {
     _credit = cfg.initialCredit;
+    // Throws if O_NONBLOCK doesn't verifiably take (→ onError → readerError):
+    // the drain loop is only correct on non-blocking fds.
     setNonBlocking(cfg.outReadFd);
     setNonBlocking(cfg.errReadFd);
     setNonBlocking(cfg.controlReadFd);
-    if (cfg.mirrorPath != null) {
-      _mirrorFd = openForWrite(cfg.mirrorPath!, append: true);
-    }
+    _mirrorFd = cfg.mirrorFd;
 
     final pfds = malloc<PollFd>(3);
     final readBuf = malloc<Uint8>(64 * 1024);
+    var pollFailures = 0;
     try {
       while (true) {
         pfds[0]
@@ -108,16 +117,32 @@ class _Reader {
           ..events = pollIn
           ..revents = 0;
 
-        poll(pfds, 3, cfg.pollTimeoutMs);
+        final rc = poll(pfds, 3, cfg.pollTimeoutMs);
+        if (rc < 0) {
+          // EINTR is retried inside poll(); anything else here is exotic
+          // (EAGAIN under kernel pressure). Tolerate transients, but a poll
+          // that fails persistently would otherwise turn this loop into a hot
+          // spin — die loudly instead (→ onError → readerError on the main
+          // isolate).
+          if (++pollFailures > 100) {
+            throw StdioCaptureException(
+                'reader poll() failing persistently: errno=$errno');
+          }
+          continue;
+        }
+        pollFailures = 0;
 
-        // Control first — a stop should win even amid a data storm.
-        if (pfds[2].revents & (pollIn | pollHup) != 0) {
+        // Control first — a stop should win even amid a data storm. POLLNVAL
+        // (fd closed under us in a teardown race) is included everywhere so a
+        // dead fd resolves to done/stop instead of spinning the loop.
+        const wake = pollIn | pollHup | pollErr | pollNval;
+        if (pfds[2].revents & wake != 0) {
           _drainControl(cfg.controlReadFd, readBuf);
         }
-        if (!_outDone && pfds[0].revents & (pollIn | pollHup | pollErr) != 0) {
+        if (!_outDone && pfds[0].revents & wake != 0) {
           _drainStream(cfg.outReadFd, StdStream.out, _outAsm, readBuf);
         }
-        if (!_errDone && pfds[1].revents & (pollIn | pollHup | pollErr) != 0) {
+        if (!_errDone && pfds[1].revents & wake != 0) {
           _drainStream(cfg.errReadFd, StdStream.err, _errAsm, readBuf);
         }
 
@@ -151,20 +176,32 @@ class _Reader {
     while (true) {
       final n = readFd(fd, buf, 64 * 1024);
       if (n > 0) {
-        // Copy out of the reused native buffer immediately — the assembler
-        // retains bytes the next read() would overwrite.
-        asm.add(Uint8List.fromList(buf.asTypedList(n)));
+        // Safe to hand the assembler a view over the reused native buffer:
+        // add() copies as it goes and retains nothing after it returns (the
+        // LineAssembler contract) — the buffer isn't touched again until the
+        // next read().
+        asm.add(buf.asTypedList(n));
       } else if (n == 0) {
         asm.flush(); // EOF: all write ends closed
-        if (stream == StdStream.out) {
-          _outDone = true;
-        } else {
-          _errDone = true;
-        }
+        _markDone(stream);
         return;
+      } else if (errno == eagain) {
+        return; // fully drained
       } else {
-        return; // EAGAIN (fully drained) or hard error
+        // Hard error (e.g. EBADF after a teardown race): the fd will never
+        // recover, so treat it as end-of-stream rather than spinning on it.
+        asm.flush();
+        _markDone(stream);
+        return;
       }
+    }
+  }
+
+  void _markDone(StdStream stream) {
+    if (stream == StdStream.out) {
+      _outDone = true;
+    } else {
+      _errDone = true;
     }
   }
 
@@ -178,7 +215,7 @@ class _Reader {
     final line = CapturedLine(rawBytes: bytes, stream: stream, at: DateTime.now());
     _ring.add(line);
     if (_ring.length > cfg.backlogLines) {
-      final dropped = _ring.removeAt(0);
+      final dropped = _ring.removeFirst();
       _droppedLines++;
       _droppedBytes += dropped.rawBytes.length;
     }
@@ -195,8 +232,9 @@ class _Reader {
       final take = _ring.length < cfg.batchMaxLines
           ? _ring.length
           : cfg.batchMaxLines;
-      final batch = _ring.sublist(0, take);
-      _ring.removeRange(0, take);
+      final batch = List<CapturedLine>.generate(
+          take, (_) => _ring.removeFirst(),
+          growable: false);
       cfg.toMain.send(ReaderBatch(batch, _droppedLines, _droppedBytes));
       _credit--;
     }
@@ -213,8 +251,15 @@ class _Reader {
             _credit++;
           }
         }
+      } else if (n == 0) {
+        // EOF: the control write end closed ⇒ the main isolate is gone or
+        // tearing down. Same conclusion for a hard read error. Either way the
+        // reader must wind down — nobody is listening anymore.
+        _stop = true;
+        return;
       } else {
-        return; // EOF or EAGAIN
+        if (errno != eagain) _stop = true;
+        return;
       }
     }
   }

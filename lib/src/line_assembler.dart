@@ -6,8 +6,12 @@ import 'dart:typed_data';
 /// straddles a `read()` boundary — which is why bytes, not decoded text, are the
 /// unit here.
 ///
-/// Callers MUST pass chunks that don't alias reused memory (copy out of a native
-/// read buffer first); the assembler retains bytes until a line completes.
+/// Contract: [add] only reads the chunk DURING the call and retains no
+/// reference to it afterwards — every range is copied into the internal
+/// builder as it's scanned (the builder is copy-on-add), and emitted lines are
+/// fresh allocations. That's what makes it safe for the reader to pass a view
+/// straight over its reused native read buffer. If you change the buffering
+/// here, keep the no-retention property or fix those callers.
 class LineAssembler {
   LineAssembler(this._onLine);
 

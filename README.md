@@ -93,6 +93,21 @@ final child = await capture.startProcess('worker', ['--serve'], source: 'worker'
   available where it's natural — `divertToFile` merges both onto one file.
 - **Bytes are the source of truth.** `CapturedLine.rawBytes` is primary; `.text`
   is a lazily-decoded (replacement-safe) convenience.
+- **Tagged children ride the main event loop.** `startProcess`/`adopt` deliver
+  through Dart streams on the main isolate — if main stalls, the *child* gets
+  backpressured (its pipe fills), unlike fd 1/2 writers which the reader
+  isolate drains regardless. An `inheritStdio` child gets the never-blocks
+  guarantee instead, at the cost of arriving untagged.
+- **Stopping under a live inherited child**: after `stop()` closes the pipes, a
+  child still writing to its inherited fd 1/2 gets `EPIPE`/`SIGPIPE` on the
+  next write — inherent to fd capture (wurlitzer behaves the same). Wind
+  children down first when you can.
+- **Don't pause a subscription.** A paused broadcast subscription buffers
+  events unboundedly (Dart stream semantics). Slow consumers should sample
+  `history` instead.
+- **After `stop()`**, `terminal`/`terminalStdout` are invalid (the saved fd is
+  closed), and a reader-isolate death during the session is surfaced on
+  `readerError` (delivery just stops; `stop()` still restores normally).
 - **`/dev/tty`-direct writes escape** (rare), and native stdio may block-buffer a
   `stdout` writer when it's redirected to a pipe.
 
@@ -110,3 +125,11 @@ without an event loop the blocking `poll()` can't service), assembles lines on
 fd 1/2, then EOFs the reader, then closes — in that order, so no `EPIPE`. All FFI
 (`dup`/`dup2`/`pipe`/`read`/`write`/`close`/`fcntl`/`ioctl`/`poll`/`isatty`/`open`),
 one dependency (`package:ffi`).
+
+Porting note learned the hard way: `open`, `fcntl`, and `ioctl` are **variadic**
+in C. On arm64 macOS a fixed-arity FFI binding passes the third argument in a
+register while the callee reads the varargs area of the stack — so `F_SETFL`
+sets random flags and `TIOCGWINSZ` reads a garbage pointer, intermittently.
+Variadic syscalls must be bound with `dart:ffi`'s `VarArgs`, and
+`setNonBlocking` verifies the flag actually took (a silently-blocking read end
+would defeat the reader's no-deadlock guarantee).

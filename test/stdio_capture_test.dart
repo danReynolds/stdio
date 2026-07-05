@@ -24,5 +24,16 @@ void main() {
       0,
       reason: 'verify.dart failed. Output:\n${result.stderr}\n${result.stdout}',
     );
+    // OS-level fd-restore regression check. This harness runs the subprocess
+    // with SEPARATE stdout/stderr pipes, and verify.dart reports on stderr
+    // AFTER many capture cycles. If any stop() mis-restored fd 2 (the classic
+    // bug: restoring it from the saved fd 1), the report would land on
+    // result.stdout instead — invisible on a terminal, where both fds point at
+    // the same tty, which is exactly why this must be asserted here.
+    expect(result.stderr, contains('ALL CHECKS PASSED'),
+        reason: 'the report must arrive on the real stderr');
+    expect(result.stdout, isNot(contains('ALL CHECKS PASSED')),
+        reason: "report leaked onto stdout — fd 2 was restored to fd 1's "
+            'target');
   });
 }
