@@ -74,6 +74,7 @@ final class StdioCapture {
     required ReceivePort fromReader,
     required this.terminal,
     required int historyLines,
+    required int maxLineBytes,
   })  : _savedFd = savedFd,
         _savedErrFd = savedErrFd,
         _outWriteFd = outWriteFd,
@@ -84,7 +85,8 @@ final class StdioCapture {
         _controlWriteFd = controlWriteFd,
         _isolate = isolate,
         _fromReader = fromReader,
-        _historyLines = historyLines;
+        _historyLines = historyLines,
+        _maxLineBytes = maxLineBytes;
 
   // A single process-global fd redirect at a time (§6.2). Main-isolate scoped.
   static bool _busy = false;
@@ -100,6 +102,7 @@ final class StdioCapture {
   final Isolate _isolate;
   final ReceivePort _fromReader;
   final int _historyLines;
+  final int _maxLineBytes;
 
   /// The real terminal, for rendering (the saved dup of fd 1). Invalid once
   /// [stop] completes — the controller closes the saved fd.
@@ -174,15 +177,23 @@ final class StdioCapture {
   /// [classify] runs once per untagged line; a non-null return becomes that
   /// line's [CapturedLine.source].
   ///
+  /// [maxLineBytes] bounds the in-progress line, so a writer that never emits
+  /// a newline can't grow memory: longer runs are delivered split into
+  /// cap-sized pieces (split, not dropped).
+  ///
   /// Throws [StateError] if a capture/redirect is already active — fd
   /// redirection is process-global, one at a time.
   static Future<StdioCapture> start({
     int historyLines = 4096,
+    int maxLineBytes = 64 * 1024,
     io.File? mirrorToFile,
     String? Function(CapturedLine line)? classify,
   }) async {
     if (historyLines < 1) {
       throw ArgumentError.value(historyLines, 'historyLines', 'must be >= 1');
+    }
+    if (maxLineBytes < 1024) {
+      throw ArgumentError.value(maxLineBytes, 'maxLineBytes', 'must be >= 1024');
     }
     if (_busy) {
       throw StateError(
@@ -263,6 +274,7 @@ final class StdioCapture {
           controlReadFd: ctrlR,
           toMain: fromReader.sendPort,
           historyLines: historyLines,
+          maxLineBytes: maxLineBytes,
           mirrorFd: mirrorFd,
         ),
         onError: fromReader.sendPort,
@@ -283,6 +295,7 @@ final class StdioCapture {
         fromReader: fromReader,
         terminal: FdTerminalSink(savedOut),
         historyLines: historyLines,
+        maxLineBytes: maxLineBytes,
       );
       cap._classify = classify;
       fromReader.listen(cap._onReaderMessage);
@@ -387,8 +400,10 @@ final class StdioCapture {
   }
 
   void _pipeChild(Stream<List<int>> stream, StdStream s, String source) {
-    final asm = LineAssembler((bytes) => _emit(CapturedLine(
-        bytes: bytes, stream: s, at: DateTime.now(), source: source)));
+    final asm = LineAssembler(
+        (bytes) => _emit(CapturedLine(
+            bytes: bytes, stream: s, at: DateTime.now(), source: source)),
+        maxLineBytes: _maxLineBytes);
     stream.listen(
       (chunk) => asm.add(chunk is Uint8List ? chunk : Uint8List.fromList(chunk)),
       onDone: asm.flush,

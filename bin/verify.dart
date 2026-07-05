@@ -224,6 +224,21 @@ Future<void> main() async {
   check(mThrew && mReusable,
       'historyLines: 0 → ArgumentError, and _busy not leaked by the throw');
 
+  stderr.writeln('== N. newline-less flood is bounded (split, not dropped) ==');
+  final n = await StdioCapture.start();
+  nativeWriteBytes(1, List<int>.filled(1024 * 1024, 0x78)); // 1 MiB, no \n
+  nativeWrite(1, '\n');
+  await Future<void>.delayed(const Duration(milliseconds: 100));
+  final nRes = await n.stop();
+  final xBytes = nRes.lines
+      .where((l) => l.stream == StdStream.out)
+      .fold<int>(0, (s, l) => s + l.bytes.length);
+  final maxLen = nRes.lines
+      .map((l) => l.bytes.length)
+      .fold<int>(0, (m, len) => len > m ? len : m);
+  check(xBytes == 1024 * 1024, 'every byte delivered exactly once ($xBytes)');
+  check(maxLen <= 64 * 1024, 'no line exceeds the 64 KiB cap (max $maxLen)');
+
   // This must appear on the REAL terminal — proof restore worked.
   stderr.writeln('== restore proof: this line is on the real terminal ==');
   stderr.writeln(_failures == 0

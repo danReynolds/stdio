@@ -59,6 +59,31 @@ void main() {
     expect(run((a) => a.flush()), isEmpty);
   });
 
+  test('caps a newline-less run at maxLineBytes — split, not dropped', () {
+    final pieces = <int>[];
+    final total = <int>[];
+    final a = LineAssembler((b) {
+      pieces.add(b.length);
+      total.addAll(b);
+    }, maxLineBytes: 1024);
+    a.add(Uint8List.fromList(List.filled(3000, 0x78))); // 3000 × 'x', no \n
+    expect(pieces, [1024, 1024], reason: 'two full pieces, 952 carried');
+    expect(a.hasPartial, isTrue);
+    a.add(b('tail\n'));
+    expect(pieces.last, 952 + 4, reason: 'carry + tail flushed by the newline');
+    a.flush();
+    expect(total.length, 3000 + 4, reason: 'every byte delivered exactly once');
+    expect(pieces.every((p) => p <= 1024), isTrue);
+  });
+
+  test('exact-cap run leaves no partial behind', () {
+    final pieces = <int>[];
+    final a = LineAssembler((b) => pieces.add(b.length), maxLineBytes: 1024);
+    a.add(Uint8List.fromList(List.filled(1024, 0x78)));
+    expect(pieces, [1024]);
+    expect(a.hasPartial, isFalse);
+  });
+
   test('retains no reference to the chunk after add() returns', () {
     // Locks the contract the reader isolate depends on: it hands add() a view
     // over its reused native read buffer, so both the emitted lines AND the

@@ -39,6 +39,12 @@ API finalization (breaking, pre-publish) + production-hardening.
 - Platform coverage verified: the full suite + fast-stop stress probe pass on
   macOS arm64 and in Linux arm64 + amd64 containers — all three varargs ABI
   conventions the `VarArgs` bindings must satisfy.
+- `maxLineBytes` (default 64 KiB) bounds the in-progress line: a writer that
+  never emits `\n` is delivered in cap-sized pieces instead of growing memory
+  without bound (makes the "never OOMs" guarantee unconditional).
+- README no longer implies the package installs signal handlers (it never
+  did, deliberately): restore is `stop()`'s job — wire your signal handling
+  to call it.
 
 ## 0.1.0 — 2026-07-04
 

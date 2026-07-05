@@ -89,10 +89,16 @@ final child = await capture.startProcess('worker', ['--serve'], source: 'worker'
   the pipes continuously — even while your main isolate is stalled — so a writer
   can't block on a full pipe. Under a storm it drops oldest (counted via
   `droppedLines` / `droppedBytes`); it never OOMs or deadlocks.
-- **Restore is best-effort.** fd 1/2 are restored on `stop()`, scoped exceptions,
-  and catchable signals. It does **not** (cannot) restore after `SIGKILL`,
-  `abort()`, or a segfault — but fd redirection is process-local, so a crash
-  leaves the parent shell untouched.
+- **Lines are bounded too.** A writer that never emits a newline can't grow
+  memory: runs longer than `maxLineBytes` (default 64 KiB) are delivered split
+  into cap-sized pieces — split, not dropped.
+- **Restore is explicit + best-effort.** `stop()` restores fd 1/2, and
+  `capture()` calls it in a `finally`, so scoped exceptions restore too. The
+  package deliberately installs **no signal handlers** (a library grabbing
+  SIGINT would fight the app's own handling — TUIs own `^C`); if you exit on
+  signals, wire your handler to call `stop()`. Nothing can restore after
+  `SIGKILL`, `abort()`, or a segfault — but fd redirection is process-local,
+  so a crash leaves the parent shell untouched.
 - **One capture at a time.** fd redirection is process-global; a second
   `start()`/`capture()` throws `StateError`. Tests using `capture()` must run
   serially if they assert on process stdio.

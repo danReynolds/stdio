@@ -13,11 +13,17 @@ import 'dart:typed_data';
 /// straight over its reused native read buffer. If you change the buffering
 /// here, keep the no-retention property or fix those callers.
 class LineAssembler {
-  LineAssembler(this._onLine);
+  LineAssembler(this._onLine, {this.maxLineBytes = 64 * 1024});
 
   /// Invoked with each completed line's bytes (newline stripped, owned by the
   /// callee).
   final void Function(Uint8List lineBytes) _onLine;
+
+  /// Upper bound on the carried partial: a writer that never emits `\n`
+  /// (binary noise, a pathological logger) must not grow memory without
+  /// bound. A run longer than this is emitted in [maxLineBytes]-sized pieces
+  /// — split, not dropped.
+  final int maxLineBytes;
 
   final BytesBuilder _partial = BytesBuilder();
 
@@ -30,6 +36,14 @@ class LineAssembler {
         _onLine(_partial.takeBytes());
         start = i + 1;
       }
+    }
+    // Carry the newline-less tail, force-emitting whenever it hits the cap so
+    // the partial stays bounded.
+    while (chunk.length - start + _partial.length >= maxLineBytes) {
+      final take = maxLineBytes - _partial.length;
+      _partial.add(Uint8List.sublistView(chunk, start, start + take));
+      _onLine(_partial.takeBytes());
+      start += take;
     }
     if (start < chunk.length) {
       _partial.add(Uint8List.sublistView(chunk, start));

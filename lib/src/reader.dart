@@ -27,6 +27,7 @@ final class ReaderConfig {
     required this.toMain,
     required this.historyLines,
     required this.mirrorFd,
+    this.maxLineBytes = 64 * 1024,
     this.initialCredit = 8,
     this.batchMaxLines = 512,
     this.pollTimeoutMs = 50,
@@ -42,6 +43,7 @@ final class ReaderConfig {
   /// main isolate — so a bad path throws at start() instead of killing this
   /// isolate. fds are process-global; the reader owns and closes it.
   final int? mirrorFd;
+  final int maxLineBytes;
   final int initialCredit;
   final int batchMaxLines;
   final int pollTimeoutMs;
@@ -72,10 +74,12 @@ class _Reader {
   _Reader(this.cfg);
   final ReaderConfig cfg;
 
-  late final LineAssembler _outAsm =
-      LineAssembler((b) => _emitLine(b, StdStream.out));
-  late final LineAssembler _errAsm =
-      LineAssembler((b) => _emitLine(b, StdStream.err));
+  late final LineAssembler _outAsm = LineAssembler(
+      (b) => _emitLine(b, StdStream.out),
+      maxLineBytes: cfg.maxLineBytes);
+  late final LineAssembler _errAsm = LineAssembler(
+      (b) => _emitLine(b, StdStream.err),
+      maxLineBytes: cfg.maxLineBytes);
   // A ListQueue so drop-oldest and batch extraction are O(1) per line — a
   // plain List's removeAt(0)/removeRange(0, n) shifts the whole backlog on
   // every operation once the ring is saturated.
