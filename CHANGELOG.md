@@ -36,6 +36,9 @@ API finalization (breaking, pre-publish) + production-hardening.
   no ordering guarantee; a separate exit port could outrun queued batches).
 - Mirror file opens (and fails) at `start()` instead of inside the reader.
 - O(1) ring buffers; bounded, verified non-blocking end to end.
+- Platform coverage verified: the full suite + fast-stop stress probe pass on
+  macOS arm64 and in Linux arm64 + amd64 containers — all three varargs ABI
+  conventions the `VarArgs` bindings must satisfy.
 
 ## 0.1.0 — 2026-07-04
 
