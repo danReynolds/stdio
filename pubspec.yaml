@@ -1,11 +1,17 @@
-name: stdio_capture
+name: stdio
 description: >-
-  File-descriptor-level capture of stdout/stderr for Dart — including output from
-  native/FFI code and inherited subprocesses that bypass Dart's stream objects.
-  POSIX (Linux + macOS).
+  File-descriptor-level capture and redirection of stdout/stderr — including
+  output from native/FFI code and child processes that bypasses Dart's stream
+  objects. POSIX (Linux + macOS).
 version: 0.2.0
-repository: https://github.com/danReynolds/stdio_capture
-publish_to: none
+repository: https://github.com/danReynolds/stdio
+publish_to: none # flip to publish
+topics:
+  - cli
+  - terminal
+  - io
+  - logging
+  - ffi
 
 environment:
   sdk: ^3.5.0

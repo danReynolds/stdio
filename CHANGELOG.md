@@ -4,6 +4,12 @@
 
 API finalization (breaking, pre-publish) + production-hardening.
 
+**Renamed: `stdio_capture` → `stdio`** (import `package:stdio/stdio.dart`).
+The scope is the process's stdio descriptors — capture, scoped capture,
+reroute, and the saved-terminal handle. stdin is deliberately untouched (a
+TUI keeps reading keys); fd-level stdin injection is a natural future
+addition.
+
 **API** — the surface now mirrors `Process.start`/`Process.run`:
 
 - `collect()` → `capture()` (returns `Captured`, as before).

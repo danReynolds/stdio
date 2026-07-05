@@ -10,15 +10,21 @@ import 'posix.dart';
 import 'reader.dart';
 import 'terminal_sink.dart';
 
-/// Result of a scoped [StdioCapture.collect].
+/// The transcript of a capture — returned by [StdioCapture.capture] and
+/// [StdioCapture.stop].
 final class Captured {
   Captured(this.lines);
 
   /// Every captured line, tagged and in delivery order (stdout/stderr exact
-  /// within each stream; cross-stream order approximate — §6.4 of the RFC).
+  /// within each stream; cross-stream order approximate — the two-pipe
+  /// tag/order trade).
   final List<CapturedLine> lines;
 
+  /// The stdout lines joined with `'\n'` — for assertions like
+  /// `cap.out.contains(...)`.
   late final String out = _join(StdStream.out);
+
+  /// The stderr lines joined with `'\n'`.
   late final String err = _join(StdStream.err);
 
   String _join(StdStream s) =>
@@ -88,7 +94,7 @@ final class StdioCapture {
         _historyLines = historyLines,
         _maxLineBytes = maxLineBytes;
 
-  // A single process-global fd redirect at a time (§6.2). Main-isolate scoped.
+  // A single process-global fd redirect at a time. Main-isolate scoped.
   static bool _busy = false;
 
   final int _savedFd; // dup of the original fd 1 — also the render target
@@ -197,7 +203,7 @@ final class StdioCapture {
     }
     if (_busy) {
       throw StateError(
-          'stdio_capture: a capture/redirect is already active. fd redirection '
+          'stdio: a capture/redirect is already active. fd redirection '
           'is process-global — stop the current one first.');
     }
     _busy = true;
@@ -279,7 +285,7 @@ final class StdioCapture {
         ),
         onError: fromReader.sendPort,
         onExit: fromReader.sendPort,
-        debugName: 'stdio_capture.reader',
+        debugName: 'stdio.reader',
       );
 
       final cap = StdioCapture._(
@@ -422,7 +428,9 @@ final class StdioCapture {
   /// [Captured] a scoped [capture] call yields. Idempotent and
   /// concurrent-safe: every call awaits the same teardown and gets the same
   /// snapshot. After this returns, [terminal]/[terminalStdout] are invalid
-  /// (their fd is closed). See §7.3 for the teardown ordering.
+  /// (their fd is closed). Teardown order: restore fd 1/2, EOF the reader,
+  /// drain to completion (bounded), then close — nothing in flight is lost
+  /// and no writer sees EPIPE.
   Future<Captured> stop() async => Captured(await _finish());
 
   Future<List<CapturedLine>> _finish() => _finishing ??= _doFinish();
@@ -506,7 +514,7 @@ final class StdioCapture {
   static Future<StdioRedirect> redirectToFile(io.File file,
       {bool append = true}) async {
     if (_busy) {
-      throw StateError('stdio_capture: a capture/redirect is already active.');
+      throw StateError('stdio: a capture/redirect is already active.');
     }
     _busy = true;
     final opened = <int>[];

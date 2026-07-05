@@ -7,7 +7,7 @@ import 'dart:ffi';
 import 'dart:io';
 
 import 'package:ffi/ffi.dart';
-import 'package:stdio_capture/stdio_capture.dart';
+import 'package:stdio/stdio.dart';
 
 // A stand-in for native/FFI code: write bytes straight to a fd, bypassing Dart.
 final _write = DynamicLibrary.process().lookupFunction<

@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:stdio_capture/src/line_assembler.dart';
+import 'package:stdio/src/line_assembler.dart';
 import 'package:test/test.dart';
 
 void main() {

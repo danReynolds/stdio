@@ -113,11 +113,11 @@ final class StdoutTerminalSink extends FdTerminalSink implements Stdout {
 
   @override
   int get terminalColumns =>
-      columns ?? (throw StdoutException('stdio_capture: not a terminal'));
+      columns ?? (throw StdoutException('stdio: not a terminal'));
 
   @override
   int get terminalLines =>
-      rows ?? (throw StdoutException('stdio_capture: not a terminal'));
+      rows ?? (throw StdoutException('stdio: not a terminal'));
 
   @override
   IOSink get nonBlocking => this; // writes are already unbuffered
