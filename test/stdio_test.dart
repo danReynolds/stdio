@@ -35,5 +35,16 @@ void main() {
     expect(result.stdout, isNot(contains('ALL CHECKS PASSED')),
         reason: "report leaked onto stdout — fd 2 was restored to fd 1's "
             'target');
+    // pause() semantics, asserted at the OS level: during the pause window,
+    // Dart print, native write(1), AND an inheritStdio child must all land on
+    // the REAL stdout (this harness's pipe), not in the capture.
+    for (final marker in [
+      'PAUSE-WINDOW-DIRECT-print',
+      'PAUSE-WINDOW-DIRECT-native',
+      'PAUSE-WINDOW-CHILD',
+    ]) {
+      expect(result.stdout, contains(marker),
+          reason: '\$marker must surface on the real stdout during pause()');
+    }
   });
 }

@@ -3,7 +3,7 @@ description: >-
   File-descriptor-level capture and redirection of stdout/stderr — including
   output from native/FFI code and child processes that bypasses Dart's stream
   objects. POSIX (Linux + macOS).
-version: 0.2.0
+version: 0.3.0
 repository: https://github.com/danReynolds/stdio
 publish_to: none # flip to publish
 topics:

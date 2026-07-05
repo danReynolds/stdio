@@ -239,6 +239,48 @@ Future<void> main() async {
   check(xBytes == 1024 * 1024, 'every byte delivered exactly once ($xBytes)');
   check(maxLen <= 64 * 1024, 'no line exceeds the 64 KiB cap (max $maxLen)');
 
+  stderr.writeln('== O. pause()/resume(): terminal-handoff window ==');
+  final o = await StdioCapture.start();
+  print('o-before-pause');
+  nativeWrite(1, 'o-native-before\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  await o.pause();
+  check(o.isPaused, 'isPaused true after pause()');
+  // These land on the REAL stdout (the harness asserts they surface on the
+  // subprocess's stdout, not in the transcript) — including a child spawned
+  // with inheritStdio, which must inherit the real descriptors mid-pause.
+  print('PAUSE-WINDOW-DIRECT-print');
+  nativeWrite(1, 'PAUSE-WINDOW-DIRECT-native\n');
+  final oChild = await Process.start('sh', ['-c', 'echo PAUSE-WINDOW-CHILD'],
+      mode: ProcessStartMode.inheritStdio);
+  await oChild.exitCode;
+  await stdout.flush();
+  await o.pause(); // idempotent
+  await o.resume();
+  check(!o.isPaused, 'isPaused false after resume()');
+  await o.resume(); // idempotent
+  print('o-after-resume');
+  nativeWrite(1, 'o-native-after\n');
+  await Future<void>.delayed(const Duration(milliseconds: 80));
+  final oRes = await o.stop();
+  check(
+      oRes.out.contains('o-before-pause') &&
+          oRes.out.contains('o-native-before'),
+      'pre-pause lines captured');
+  check(
+      oRes.out.contains('o-after-resume') &&
+          oRes.out.contains('o-native-after'),
+      'post-resume lines captured');
+  check(!oRes.out.contains('PAUSE-WINDOW'),
+      'pause-window lines NOT captured (went to the real terminal)');
+  var oThrew = false;
+  try {
+    await o.pause();
+  } on StateError {
+    oThrew = true;
+  }
+  check(oThrew, 'pause() after stop() throws StateError');
+
   // This must appear on the REAL terminal — proof restore worked.
   stderr.writeln('== restore proof: this line is on the real terminal ==');
   stderr.writeln(_failures == 0

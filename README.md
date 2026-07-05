@@ -69,6 +69,12 @@ myDriver.write(frame, to: capture.terminal);          // an IOSink
 runApp(driver: PosixDriver(stdoutOverride: capture.terminalStdout));
 
 await capture.stop();
+
+// Terminal handoff (an $EDITOR, a pager): point fd 1/2 back at the real
+// terminal for the child, then re-capture — the session stays live:
+await capture.pause();
+await (await Process.start(editor, [file], mode: ProcessStartMode.inheritStdio)).exitCode;
+await capture.resume();
 ```
 
 Children too: `capture.startProcess('worker', [], source: 'worker')` merges a

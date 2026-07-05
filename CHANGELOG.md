@@ -1,3 +1,12 @@
+## 0.3.0
+
+- `pause()` / `resume()` / `isPaused`: temporarily point fd 1/2 back at the
+  real terminal without tearing the session down — the terminal-handoff
+  primitive for TUIs (spawn `$EDITOR`/a pager with `inheritStdio` mid-session;
+  the child inherits the real descriptors). Buffered writers are flushed at
+  both edges so bytes land on the side of the boundary they were written on.
+  `stop()` remains safe while paused.
+
 # Changelog
 
 ## 0.2.0 — 2026-07-04

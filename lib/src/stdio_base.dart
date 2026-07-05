@@ -424,13 +424,68 @@ final class StdioCapture {
     }
   }
 
+  bool _paused = false;
+
+  /// Whether the capture is currently [pause]d.
+  bool get isPaused => _paused;
+
+  /// Temporarily point fd 1/2 back at the real terminal without tearing the
+  /// session down — the reader, pipes, streams, [history], and
+  /// [terminal]/[terminalStdout] all stay live; writes during the pause go
+  /// straight to the terminal and are NOT captured.
+  ///
+  /// This is the terminal-handoff primitive for TUIs: suspend capture, spawn
+  /// `$EDITOR`/a pager with `ProcessStartMode.inheritStdio` (the child
+  /// inherits the *real* descriptors), then [resume] when it exits. Dart's
+  /// buffered stdout/stderr are flushed into the pipe first, so bytes written
+  /// before the pause stay part of the capture.
+  ///
+  /// No-op if already paused. Throws [StateError] after [stop].
+  Future<void> pause() async {
+    if (_closed || _finishing != null) {
+      throw StateError('stdio: capture is stopped.');
+    }
+    if (_paused) return;
+    try {
+      await io.stdout.flush();
+    } catch (_) {}
+    try {
+      await io.stderr.flush();
+    } catch (_) {}
+    dup2(_savedFd, 1);
+    dup2(_savedErrFd, 2);
+    _paused = true;
+  }
+
+  /// Re-redirect fd 1/2 into the capture after a [pause]. Terminal-bound
+  /// buffered bytes are flushed first, so pause-window output lands on the
+  /// terminal rather than leaking into the capture.
+  ///
+  /// No-op if not paused. Throws [StateError] after [stop].
+  Future<void> resume() async {
+    if (_closed || _finishing != null) {
+      throw StateError('stdio: capture is stopped.');
+    }
+    if (!_paused) return;
+    try {
+      await io.stdout.flush();
+    } catch (_) {}
+    try {
+      await io.stderr.flush();
+    } catch (_) {}
+    dup2(_outWriteFd, 1);
+    dup2(_errWriteFd, 2);
+    _paused = false;
+  }
+
   /// Restore fd 1/2 and tear down, returning the full transcript — the same
   /// [Captured] a scoped [capture] call yields. Idempotent and
   /// concurrent-safe: every call awaits the same teardown and gets the same
   /// snapshot. After this returns, [terminal]/[terminalStdout] are invalid
   /// (their fd is closed). Teardown order: restore fd 1/2, EOF the reader,
   /// drain to completion (bounded), then close — nothing in flight is lost
-  /// and no writer sees EPIPE.
+  /// and no writer sees EPIPE. Safe to call while [pause]d (the restore is
+  /// idempotent).
   Future<Captured> stop() async => Captured(await _finish());
 
   Future<List<CapturedLine>> _finish() => _finishing ??= _doFinish();
