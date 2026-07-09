@@ -118,6 +118,14 @@ final class StdioCapture {
   /// that require the concrete type rather than a [TerminalSink]/[IOSink].
   late final io.Stdout terminalStdout = StdoutTerminalSink(_savedFd);
 
+  /// Where fd 2 originally pointed (the saved dup), as a concrete
+  /// [io.Stdout]-shaped sink. The two can differ (`2>file`, a parent that
+  /// pipes them separately), so a consumer tee-ing captured lines back out —
+  /// e.g. a served TUI forwarding output to its host process while also
+  /// buffering it — can preserve the stdout/stderr split instead of folding
+  /// stderr into the stdout pipe. Invalid once [stop] completes.
+  late final io.Stdout terminalStderr = StdoutTerminalSink(_savedErrFd);
+
   final _out = StreamController<CapturedLine>.broadcast();
   final _err = StreamController<CapturedLine>.broadcast();
   final _combined = StreamController<CapturedLine>.broadcast();
