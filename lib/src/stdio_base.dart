@@ -201,6 +201,7 @@ final class StdioCapture {
     int historyLines = 4096,
     int maxLineBytes = 64 * 1024,
     io.File? mirrorToFile,
+    bool mirrorToSavedFds = false,
     String? Function(CapturedLine line)? classify,
   }) async {
     if (historyLines < 1) {
@@ -290,6 +291,15 @@ final class StdioCapture {
           historyLines: historyLines,
           maxLineBytes: maxLineBytes,
           mirrorFd: mirrorFd,
+          // Raw passthrough to wherever fd 1/2 originally pointed —
+          // byte-transparent, split-intact, written on the reader isolate so
+          // the captured process's isolates never block on a slow consumer.
+          // For sessions whose original descriptors carry no rendered frames
+          // (a served/agent app writing to a parent's pipe). The controller
+          // still owns and closes the saved fds on stop(); the reader only
+          // writes them.
+          savedOutFd: mirrorToSavedFds ? savedOut : null,
+          savedErrFd: mirrorToSavedFds ? savedErr : null,
         ),
         onError: fromReader.sendPort,
         onExit: fromReader.sendPort,

@@ -7,6 +7,7 @@
 
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
@@ -143,6 +144,38 @@ int poll(Pointer<PollFd> fds, int n, int timeoutMs) =>
 /// A single `read()`, retrying EINTR. Returns bytes read (0 = EOF, <0 = error).
 int readFd(int fd, Pointer<Uint8> buf, int len) =>
     _retry(() => _read(fd, buf, len));
+
+/// A single best-effort write pass: writes as much of [bytes] as the fd will
+/// take RIGHT NOW (looping only over EINTR and partial progress), and returns
+/// the number of bytes consumed — possibly 0 when a non-blocking fd is full
+/// (EAGAIN). Returns -1 on hard error. Never blocks, never throws: the
+/// caller owns the retry/carry/drop policy. This is the primitive for
+/// mirroring captured output back to a saved fd from the reader isolate,
+/// whose contract is that it can never block.
+int fdWriteBest(int fd, Uint8List bytes) {
+  if (bytes.isEmpty) return 0;
+  final n = bytes.length;
+  final buf = malloc<Uint8>(n);
+  try {
+    buf.asTypedList(n).setAll(0, bytes);
+    var off = 0;
+    while (off < n) {
+      final w = _write(fd, buf + off, n - off);
+      if (w > 0) {
+        off += w;
+      } else if (w < 0 && errno == eintr) {
+        continue;
+      } else if (w < 0 && errno == eagain) {
+        return off; // fd full — caller carries the remainder
+      } else {
+        return -1; // hard error — caller disables the mirror
+      }
+    }
+    return off;
+  } finally {
+    malloc.free(buf);
+  }
+}
 
 /// Writes ALL of [bytes] to [fd], looping over partial writes and EINTR. A short
 /// write to a terminal would otherwise truncate a frame. Throws on hard error.

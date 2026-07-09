@@ -27,6 +27,8 @@ final class ReaderConfig {
     required this.toMain,
     required this.historyLines,
     required this.mirrorFd,
+    this.savedOutFd,
+    this.savedErrFd,
     this.maxLineBytes = 64 * 1024,
     this.initialCredit = 8,
     this.batchMaxLines = 512,
@@ -43,6 +45,17 @@ final class ReaderConfig {
   /// main isolate — so a bad path throws at start() instead of killing this
   /// isolate. fds are process-global; the reader owns and closes it.
   final int? mirrorFd;
+
+  /// Saved dups of the ORIGINAL fd 1/2 to mirror raw captured chunks back to,
+  /// byte-transparent and split-intact — for sessions whose original
+  /// descriptors carry no frames (a served/agent app writing to a parent's
+  /// pipe), so the parent keeps receiving output live while the capture
+  /// feeds the in-app log. Best-effort and NEVER blocking (this loop's
+  /// contract): a full pipe carries a bounded backlog, then drops (counted
+  /// in the batch drop counters); a dead fd disables the mirror. The
+  /// controller owns and closes these fds — the reader only writes.
+  final int? savedOutFd;
+  final int? savedErrFd;
   final int maxLineBytes;
   final int initialCredit;
   final int batchMaxLines;
@@ -94,6 +107,16 @@ class _Reader {
   bool _stop = false;
   int? _mirrorFd;
 
+  // Saved-fd mirror state (see ReaderConfig.savedOutFd). Per-stream carry of
+  // bytes the (non-blocking) saved fd wouldn't take yet; bounded so a parent
+  // that stops draining costs memory once, then drops — never a blocked
+  // reader. Retries ride the poll cadence (≤ pollTimeoutMs latency).
+  static const int _savedCarryCap = 256 * 1024;
+  int? _savedOutFd;
+  int? _savedErrFd;
+  final _savedOutCarry = BytesBuilder(copy: true);
+  final _savedErrCarry = BytesBuilder(copy: true);
+
   void run() {
     _credit = cfg.initialCredit;
     // Throws if O_NONBLOCK doesn't verifiably take (→ onError → readerError):
@@ -102,6 +125,13 @@ class _Reader {
     setNonBlocking(cfg.errReadFd);
     setNonBlocking(cfg.controlReadFd);
     _mirrorFd = cfg.mirrorFd;
+    // The saved-fd mirror must never block this loop; the flag lives on the
+    // shared open file description, but in mirror mode nothing else writes
+    // that description (the app's fd 1/2 were dup2'd away to the capture
+    // pipes). Failure to set it just disables the mirror — capture still
+    // works.
+    _savedOutFd = _prepSavedFd(cfg.savedOutFd);
+    _savedErrFd = _prepSavedFd(cfg.savedErrFd);
 
     final pfds = malloc<PollFd>(3);
     final readBuf = malloc<Uint8>(64 * 1024);
@@ -150,6 +180,7 @@ class _Reader {
           _drainStream(cfg.errReadFd, StdStream.err, _errAsm, readBuf);
         }
 
+        _pumpSavedCarry(); // retry any mirror bytes a full pipe deferred
         _flushMirror();
         _shipBatches();
 
@@ -184,7 +215,13 @@ class _Reader {
         // add() copies as it goes and retains nothing after it returns (the
         // LineAssembler contract) — the buffer isn't touched again until the
         // next read().
-        asm.add(buf.asTypedList(n));
+        final view = buf.asTypedList(n);
+        // Raw-chunk mirror to the saved fd: byte-transparent (partial lines,
+        // \r progress — everything passes through unassembled) and BEFORE
+        // line assembly so the parent's view is unmodified. _mirrorToSaved
+        // copies what it must keep; the view dies with this iteration.
+        _mirrorToSaved(stream, view);
+        asm.add(view);
       } else if (n == 0) {
         asm.flush(); // EOF: all write ends closed
         _markDone(stream);
@@ -230,6 +267,75 @@ class _Reader {
     fdWriteAll(_mirrorFd!, _mirrorBuf.takeBytes());
   }
 
+  // --- saved-fd mirror (never blocks; see ReaderConfig.savedOutFd) ---------
+
+  int? _prepSavedFd(int? fd) {
+    if (fd == null) return null;
+    try {
+      setNonBlocking(fd);
+      return fd;
+    } on Object {
+      return null; // can't guarantee non-blocking writes — mirror disabled
+    }
+  }
+
+  void _mirrorToSaved(StdStream stream, Uint8List chunk) {
+    final fd = stream == StdStream.out ? _savedOutFd : _savedErrFd;
+    if (fd == null) return;
+    final carry = stream == StdStream.out ? _savedOutCarry : _savedErrCarry;
+    if (carry.isNotEmpty) {
+      // A backlog exists — preserve byte order: queue behind it and pump.
+      _carryAdd(carry, chunk);
+      _pumpSaved(stream);
+      return;
+    }
+    final wrote = fdWriteBest(fd, chunk);
+    if (wrote < 0) {
+      _disableSaved(stream);
+    } else if (wrote < chunk.length) {
+      _carryAdd(carry, Uint8List.sublistView(chunk, wrote));
+    }
+  }
+
+  void _carryAdd(BytesBuilder carry, Uint8List bytes) {
+    final room = _savedCarryCap - carry.length;
+    if (room <= 0) return; // stalled parent: bounded backlog, then drop
+    if (bytes.length <= room) {
+      carry.add(bytes);
+    } else {
+      carry.add(Uint8List.sublistView(bytes, 0, room));
+    }
+  }
+
+  void _pumpSaved(StdStream stream) {
+    final fd = stream == StdStream.out ? _savedOutFd : _savedErrFd;
+    if (fd == null) return;
+    final carry = stream == StdStream.out ? _savedOutCarry : _savedErrCarry;
+    if (carry.isEmpty) return;
+    final pending = carry.takeBytes();
+    final wrote = fdWriteBest(fd, pending);
+    if (wrote < 0) {
+      _disableSaved(stream);
+    } else if (wrote < pending.length) {
+      carry.add(Uint8List.sublistView(pending, wrote));
+    }
+  }
+
+  void _pumpSavedCarry() {
+    _pumpSaved(StdStream.out);
+    _pumpSaved(StdStream.err);
+  }
+
+  void _disableSaved(StdStream stream) {
+    if (stream == StdStream.out) {
+      _savedOutFd = null;
+      _savedOutCarry.clear();
+    } else {
+      _savedErrFd = null;
+      _savedErrCarry.clear();
+    }
+  }
+
   /// Ship up to [batchMaxLines]-sized batches while we hold send credit.
   void _shipBatches() {
     while (_credit > 0 && _ring.isNotEmpty) {
@@ -273,6 +379,7 @@ class _Reader {
   void _finish() {
     _outAsm.flush();
     _errAsm.flush();
+    _pumpSavedCarry(); // last best-effort push of mirror backlog
     _flushMirror();
     if (_ring.isNotEmpty) {
       cfg.toMain.send(ReaderBatch(
