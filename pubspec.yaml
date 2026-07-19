@@ -5,7 +5,6 @@ description: >-
   objects. POSIX (Linux + macOS).
 version: 0.3.0
 repository: https://github.com/danReynolds/stdio
-publish_to: none # flip to publish
 topics:
   - cli
   - terminal

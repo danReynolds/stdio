@@ -1,0 +1,8 @@
+# Mirrors .gitignore (a .pubignore overrides it for `dart pub publish`), plus
+# the agent guide, which is repo tooling, not package content.
+.dart_tool/
+pubspec.lock
+build/
+*.log
+dbg-out.txt
+CLAUDE.md
