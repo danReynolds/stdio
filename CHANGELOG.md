@@ -1,3 +1,13 @@
+## 0.4.0
+
+- **Breaking:** renamed the main class `StdioCapture` → `Stdio`, so the entry
+  points read as `Stdio.capture` / `Stdio.start` / `Stdio.redirectToFile`
+  (matching the package name). The internal exception `StdioCaptureException`
+  is now `StdioException` (it is not exported). No behavior change.
+- Docs: the README and library summary are now general-purpose — capturing
+  native/child output is the headline; the terminal-handle feature is one use
+  among several rather than the framing.
+
 ## 0.3.0
 
 - `pause()` / `resume()` / `isPaused`: temporarily point fd 1/2 back at the

@@ -159,7 +159,7 @@ class _Reader {
           // spin — die loudly instead (→ onError → readerError on the main
           // isolate).
           if (++pollFailures > 100) {
-            throw StdioCaptureException(
+            throw StdioException(
                 'reader poll() failing persistently: errno=$errno');
           }
           continue;

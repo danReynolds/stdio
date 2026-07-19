@@ -199,7 +199,7 @@ void fdWriteAll(int fd, List<int> bytes) {
         // a core; block in poll() until writable instead.
         _awaitWritable(fd);
       } else {
-        throw StdioCaptureException('write(fd=$fd) failed: errno=$errno');
+        throw StdioException('write(fd=$fd) failed: errno=$errno');
       }
     }
   } finally {
@@ -228,7 +228,7 @@ void _awaitWritable(int fd) {
   try {
     final rc = _pipe(pair);
     if (rc != 0) {
-      throw StdioCaptureException('pipe() failed: errno=$errno');
+      throw StdioException('pipe() failed: errno=$errno');
     }
     return (pair[0], pair[1]);
   } finally {
@@ -255,12 +255,12 @@ void setCloexec(int fd) {
 void setNonBlocking(int fd) {
   final flags = _fcntlGet(fd, fGetfl);
   if (flags < 0) {
-    throw StdioCaptureException('fcntl(F_GETFL, fd=$fd) failed: errno=$errno');
+    throw StdioException('fcntl(F_GETFL, fd=$fd) failed: errno=$errno');
   }
   _fcntlSet(fd, fSetfl, flags | oNonBlock);
   final after = _fcntlGet(fd, fGetfl);
   if (after < 0 || (after & oNonBlock) == 0) {
-    throw StdioCaptureException(
+    throw StdioException(
         'fcntl(F_SETFL, fd=$fd) did not set O_NONBLOCK '
         '(flags $flags -> $after, errno=$errno)');
   }
@@ -285,7 +285,7 @@ int openForWrite(String path, {required bool append}) {
     final flags = oWronly | (append ? oAppend : oTrunc);
     final fd = _retry(() => _open(cPath.cast(), flags, 0));
     if (fd < 0) {
-      throw StdioCaptureException('open("$path") failed: errno=$errno');
+      throw StdioException('open("$path") failed: errno=$errno');
     }
     return fd;
   } finally {
@@ -308,9 +308,9 @@ int openForWrite(String path, {required bool append}) {
   }
 }
 
-class StdioCaptureException implements Exception {
-  StdioCaptureException(this.message);
+class StdioException implements Exception {
+  StdioException(this.message);
   final String message;
   @override
-  String toString() => 'StdioCaptureException: $message';
+  String toString() => 'StdioException: $message';
 }

@@ -34,7 +34,7 @@ void check(bool ok, String label) {
 
 Future<void> main() async {
   stderr.writeln('== A. capture() captures native + Dart, tagged ==');
-  final a = await StdioCapture.capture(() {
+  final a = await Stdio.capture(() {
     print('dart-print-out');
     stderr.writeln('dart-stderr-err');
     nativeWrite(1, 'native-out\n');
@@ -48,7 +48,7 @@ Future<void> main() async {
       'streams kept distinct');
 
   stderr.writeln('== B. start()/stop() controller: streams + history + restore ==');
-  final b = await StdioCapture.start();
+  final b = await Stdio.start();
   final bOut = <String>[];
   final bAll = <CapturedLine>[];
   b.stdout.listen((l) => bOut.add(l.text));
@@ -74,7 +74,7 @@ Future<void> main() async {
   stderr.writeln('== C. storm: >pipe-capacity while main is busy → no deadlock ==');
   const stormN = 40000;
   final sw = Stopwatch()..start();
-  final c = await StdioCapture.capture(() {
+  final c = await Stdio.capture(() {
     for (var i = 0; i < stormN; i++) {
       nativeWrite(1, 'storm-line-$i-padding-padding-padding-padding\n');
     }
@@ -85,10 +85,10 @@ Future<void> main() async {
       'bounded: kept ${c.lines.length} of $stormN (dropped the rest)');
 
   stderr.writeln('== D. double-start throws ==');
-  final d = await StdioCapture.start();
+  final d = await Stdio.start();
   var threw = false;
   try {
-    await StdioCapture.start();
+    await Stdio.start();
   } on StateError {
     threw = true;
   }
@@ -98,7 +98,7 @@ Future<void> main() async {
   stderr.writeln('== E. redirectToFile writes both streams to a file ==');
   final tmp = File('${Directory.systemTemp.path}/stdio_capture_verify.log');
   if (tmp.existsSync()) tmp.deleteSync();
-  final div = await StdioCapture.redirectToFile(tmp);
+  final div = await Stdio.redirectToFile(tmp);
   print('file-out-line');
   nativeWrite(2, 'file-err-line\n');
   await stdout.flush();
@@ -111,7 +111,7 @@ Future<void> main() async {
   stderr.writeln('== F. mirrorToFile durable log ==');
   final mirror = File('${Directory.systemTemp.path}/stdio_capture_mirror.log');
   if (mirror.existsSync()) mirror.deleteSync();
-  final f = await StdioCapture.start(mirrorToFile: mirror);
+  final f = await Stdio.start(mirrorToFile: mirror);
   nativeWrite(1, 'mirror-line-1\n');
   nativeWrite(2, 'mirror-line-2\n');
   await Future<void>.delayed(const Duration(milliseconds: 80));
@@ -122,7 +122,7 @@ Future<void> main() async {
   mirror.deleteSync();
 
   stderr.writeln('== G. startProcess tags a subprocess ==');
-  final g = await StdioCapture.start();
+  final g = await Stdio.start();
   final proc = await g.startProcess(
       'sh', ['-c', 'echo child-out; echo child-err >&2'],
       source: 'child');
@@ -143,7 +143,7 @@ Future<void> main() async {
       'child stderr tagged source=child');
 
   stderr.writeln('== H. classifier tags the in-process stream ==');
-  final h = await StdioCapture.start(
+  final h = await Stdio.start(
       classify: (l) => l.text.startsWith('TAG:') ? 'tagged' : null);
   nativeWrite(1, 'TAG:hello\n');
   nativeWrite(1, 'plain\n');
@@ -155,7 +155,7 @@ Future<void> main() async {
       'classifier left the non-matching line null');
 
   stderr.writeln('== I. multi-byte UTF-8 split across writes ==');
-  final iCap = await StdioCapture.start();
+  final iCap = await Stdio.start();
   final snow = utf8.encode('snow☃man'); // ☃ is 3 bytes (E2 98 83)
   nativeWriteBytes(1, snow.sublist(0, 5)); // splits mid-☃
   nativeWriteBytes(1, [...snow.sublist(5), 0x0A]);
@@ -167,7 +167,7 @@ Future<void> main() async {
   stderr.writeln('== J. capture() restores + releases even when body throws ==');
   var jThrew = false;
   try {
-    await StdioCapture.capture(() {
+    await Stdio.capture(() {
       print('pre-throw-line');
       throw StateError('boom');
     });
@@ -178,7 +178,7 @@ Future<void> main() async {
   // If the redirect leaked, this start() would throw StateError(busy); if fd
   // 1/2 still pointed at the dead pipes, the capture below would misbehave —
   // and the harness's own post-throw stderr reporting would vanish.
-  final j2 = await StdioCapture.capture(() => print('post-throw-line'));
+  final j2 = await Stdio.capture(() => print('post-throw-line'));
   check(j2.out.contains('post-throw-line'),
       'capture fully usable again after the throw');
 
@@ -188,19 +188,19 @@ Future<void> main() async {
     ..writeAsStringSync('x');
   var kThrew = false;
   try {
-    await StdioCapture.start(mirrorToFile: File('${kBlocker.path}/nope.log'));
+    await Stdio.start(mirrorToFile: File('${kBlocker.path}/nope.log'));
   } catch (_) {
     kThrew = true;
   }
   check(kThrew, 'start() threw instead of killing the reader silently');
-  final k2 = await StdioCapture.capture(
+  final k2 = await Stdio.capture(
       () => nativeWrite(1, 'after-mirror-fail\n'));
   check(k2.out.contains('after-mirror-fail'),
       'rolled back cleanly: capture usable again');
   kBlocker.deleteSync();
 
   stderr.writeln('== L. stop() is idempotent + concurrent-safe ==');
-  final l = await StdioCapture.start();
+  final l = await Stdio.start();
   nativeWrite(1, 'l-line\n');
   await Future<void>.delayed(const Duration(milliseconds: 80));
   await Future.wait([l.stop(), l.stop()]); // concurrent
@@ -211,13 +211,13 @@ Future<void> main() async {
   stderr.writeln('== M. argument validation ==');
   var mThrew = false;
   try {
-    await StdioCapture.start(historyLines: 0);
+    await Stdio.start(historyLines: 0);
   } on ArgumentError {
     mThrew = true;
   }
   var mReusable = false;
   try {
-    final m2 = await StdioCapture.start();
+    final m2 = await Stdio.start();
     await m2.stop();
     mReusable = true;
   } catch (_) {}
@@ -225,7 +225,7 @@ Future<void> main() async {
       'historyLines: 0 → ArgumentError, and _busy not leaked by the throw');
 
   stderr.writeln('== N. newline-less flood is bounded (split, not dropped) ==');
-  final n = await StdioCapture.start();
+  final n = await Stdio.start();
   nativeWriteBytes(1, List<int>.filled(1024 * 1024, 0x78)); // 1 MiB, no \n
   nativeWrite(1, '\n');
   await Future<void>.delayed(const Duration(milliseconds: 100));
@@ -240,7 +240,7 @@ Future<void> main() async {
   check(maxLen <= 64 * 1024, 'no line exceeds the 64 KiB cap (max $maxLen)');
 
   stderr.writeln('== O. pause()/resume(): terminal-handoff window ==');
-  final o = await StdioCapture.start();
+  final o = await Stdio.start();
   print('o-before-pause');
   nativeWrite(1, 'o-native-before\n');
   await Future<void>.delayed(const Duration(milliseconds: 80));

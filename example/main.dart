@@ -10,7 +10,7 @@ import 'package:stdio/stdio.dart';
 
 Future<void> main() async {
   // ── 1. Scoped: capture exactly one body, get the transcript ──────────────
-  final cap = await StdioCapture.capture(() {
+  final cap = await Stdio.capture(() {
     print('hello from stdout');
     stderr.writeln('and from stderr');
   });
@@ -19,7 +19,7 @@ Future<void> main() async {
   print('stderr side: ${cap.err}');
 
   // ── 2. Session: live streams + history + the real terminal ───────────────
-  final capture = await StdioCapture.start(
+  final capture = await Stdio.start(
     classify: (l) => l.text.startsWith('[db]') ? 'db' : null,
   );
   final seen = <String>[];
@@ -38,7 +38,7 @@ Future<void> main() async {
 
   // ── 3. Redirect: no capture — point fd 1/2 at a file and walk away ───────
   final log = File('${Directory.systemTemp.path}/stdio_example.log');
-  final redirect = await StdioCapture.redirectToFile(log);
+  final redirect = await Stdio.redirectToFile(log);
   print('this goes to the file, not the screen');
   stderr.writeln('this too, in exact write order');
   await stdout.flush();

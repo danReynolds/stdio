@@ -10,8 +10,8 @@ import 'posix.dart';
 import 'reader.dart';
 import 'terminal_sink.dart';
 
-/// The transcript of a capture — returned by [StdioCapture.capture] and
-/// [StdioCapture.stop].
+/// The transcript of a capture — returned by [Stdio.capture] and
+/// [Stdio.stop].
 final class Captured {
   Captured(this.lines);
 
@@ -46,7 +46,7 @@ final class StdioRedirect {
     dup2(_saved2, 2);
     closeFd(_saved1);
     closeFd(_saved2);
-    StdioCapture._busy = false;
+    Stdio._busy = false;
   }
 }
 
@@ -58,7 +58,7 @@ final class StdioRedirect {
 /// and [redirectToFile] reroutes fd 1/2 with no capture at all.
 ///
 /// ```dart
-/// final capture = await StdioCapture.start(historyLines: 8192);
+/// final capture = await Stdio.start(historyLines: 8192);
 ///
 /// capture.history.forEach(paint);            // lines from before you subscribed
 /// final sub = capture.output.listen(paint);  // live from now on
@@ -66,8 +66,8 @@ final class StdioRedirect {
 ///
 /// final result = await capture.stop();       // restore fd 1/2, full transcript
 /// ```
-final class StdioCapture {
-  StdioCapture._({
+final class Stdio {
+  Stdio._({
     required int savedFd,
     required int savedErrFd,
     required int outWriteFd,
@@ -197,7 +197,7 @@ final class StdioCapture {
   ///
   /// Throws [StateError] if a capture/redirect is already active — fd
   /// redirection is process-global, one at a time.
-  static Future<StdioCapture> start({
+  static Future<Stdio> start({
     int historyLines = 4096,
     int maxLineBytes = 64 * 1024,
     io.File? mirrorToFile,
@@ -226,14 +226,14 @@ final class StdioCapture {
     ReceivePort? fromReader;
     try {
       savedOut = dup(1);
-      if (savedOut < 0) throw StdioCaptureException('dup(1) failed: errno=$errno');
+      if (savedOut < 0) throw StdioException('dup(1) failed: errno=$errno');
       opened.add(savedOut);
       setCloexec(savedOut);
       // fd 2 gets its own save — the two can point at different places
       // (`prog 2>err.log`), so restoring both from a dup of fd 1 would silently
       // re-route stderr on stop.
       savedErr = dup(2);
-      if (savedErr < 0) throw StdioCaptureException('dup(2) failed: errno=$errno');
+      if (savedErr < 0) throw StdioException('dup(2) failed: errno=$errno');
       opened.add(savedErr);
       setCloexec(savedErr);
 
@@ -306,7 +306,7 @@ final class StdioCapture {
         debugName: 'stdio.reader',
       );
 
-      final cap = StdioCapture._(
+      final cap = Stdio._(
         savedFd: savedOut,
         savedErrFd: savedErr,
         outWriteFd: outW,
@@ -354,7 +354,7 @@ final class StdioCapture {
         // streams so listeners observe onDone instead of silence. stop()
         // still restores normally.
         _readerError ??=
-            StdioCaptureException('reader isolate exited unexpectedly');
+            StdioException('reader isolate exited unexpectedly');
         _combined.close();
         _out.close();
         _err.close();
@@ -510,7 +510,7 @@ final class StdioCapture {
 
   static void _dup2Checked(int from, int to, String op) {
     if (dup2(from, to) < 0) {
-      throw StdioCaptureException(
+      throw StdioException(
           'stdio: $op dup2($from, $to) failed: errno=$errno');
     }
   }
@@ -583,7 +583,7 @@ final class StdioCapture {
   /// The `Process.run` to [start]'s `Process.start`: use this when the
   /// capture doesn't outlive one call — tests, wrapping a noisy init.
   static Future<Captured> capture(FutureOr<void> Function() body) async {
-    final cap = await StdioCapture.start();
+    final cap = await Stdio.start();
     var lines = const <CapturedLine>[];
     try {
       await body();
@@ -613,11 +613,11 @@ final class StdioCapture {
     final opened = <int>[];
     try {
       final saved1 = dup(1);
-      if (saved1 < 0) throw StdioCaptureException('dup(1) failed: errno=$errno');
+      if (saved1 < 0) throw StdioException('dup(1) failed: errno=$errno');
       opened.add(saved1);
       setCloexec(saved1);
       final saved2 = dup(2);
-      if (saved2 < 0) throw StdioCaptureException('dup(2) failed: errno=$errno');
+      if (saved2 < 0) throw StdioException('dup(2) failed: errno=$errno');
       opened.add(saved2);
       setCloexec(saved2);
       final fileFd = openForWrite(file.path, append: append);
