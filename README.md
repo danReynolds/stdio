@@ -69,6 +69,18 @@ final redirect = await Stdio.redirectToFile(File('service.log'));
 await redirect.stop();
 ```
 
+One rule ties the vocabulary together: **capture** brings the bytes *to you*,
+**mirror** sends a *copy elsewhere while you capture*, and **redirect** sends
+them *away instead of to you*. Picking an entry point:
+
+| You want | Use |
+| --- | --- |
+| Assert on / collect one body's output (and its return value) | `Stdio.capture(body)` |
+| Observe output live until you say stop | `Stdio.start()` |
+| …plus a durable file copy of every captured line (tee) | `start(mirrorToFile: …)` |
+| …plus the parent process still receiving the raw byte stream | `start(mirrorToOriginal: true)` |
+| Output into a file, nothing observed in-process, zero overhead — `prog >log 2>&1` from inside | `Stdio.redirectToFile(file)` |
+
 Lines arrive as bytes (`CapturedLine.bytes`) with a lazy, replacement-safe UTF-8
 `.text` view (one trailing `\r` tidied away), tagged stdout/stderr, with a
 monotonic per-session `seq`, plus `history` (what was captured before you

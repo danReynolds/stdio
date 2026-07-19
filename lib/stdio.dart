@@ -20,6 +20,10 @@
 /// - [Stdio.redirectToFile] — reroute fd 1/2 to a file with no capture
 ///   at all (exact merged order, zero overhead).
 ///
+/// The vocabulary in one rule: **capture** brings the bytes to you, **mirror**
+/// (`mirrorToFile` / `mirrorToOriginal`) sends a copy elsewhere while you
+/// capture, and **redirect** sends them away instead of to you.
+///
 /// stdin (fd 0) is deliberately untouched: your app — an interactive program
 /// reading keys, a REPL — keeps its input exactly as it was.
 library;
