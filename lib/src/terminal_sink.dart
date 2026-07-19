@@ -24,6 +24,18 @@ abstract interface class TerminalSink implements IOSink {
   /// The saved fd. Advanced: do not `close()` it or write to it concurrently
   /// with this sink.
   int get fd;
+
+  /// A no-op that completes immediately: writes at this layer are unbuffered
+  /// — every [add]/[write] is a completed `write()` syscall by the time it
+  /// returns — so there is never anything to flush.
+  @override
+  Future<void> flush();
+
+  /// A no-op: the capture session owns the saved fd's lifecycle (it restores
+  /// and closes it on `stop()`), so closing the sink must not close the fd —
+  /// that would break rendering mid-session.
+  @override
+  Future<void> close();
 }
 
 /// [TerminalSink] backed by direct FFI `write()`s to a fd. Writes are synchronous
@@ -122,6 +134,16 @@ final class StdoutTerminalSink extends FdTerminalSink implements Stdout {
   @override
   IOSink get nonBlocking => this; // writes are already unbuffered
 
+  /// The terminator [writeln] appends — `'\n'` unless you set it.
+  ///
+  /// Narrower than `dart:io`'s [Stdout.lineTerminator]: it applies ONLY to
+  /// the terminator [writeln] itself appends. `'\n'` characters inside
+  /// written payloads pass through untranslated — this sink is
+  /// byte-transparent (a rendered frame must reach the terminal exactly as
+  /// produced).
   @override
   String lineTerminator = '\n';
+
+  @override
+  void writeln([Object? object = '']) => write('$object$lineTerminator');
 }

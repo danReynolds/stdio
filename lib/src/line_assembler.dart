@@ -32,6 +32,18 @@ class LineAssembler {
     var start = 0;
     for (var i = 0; i < chunk.length; i++) {
       if (chunk[i] == 0x0A) {
+        // The newline branch enforces the cap too: a terminated line arriving
+        // within one read chunk must not bypass it. Emit cap-sized pieces
+        // while the combined carry + segment EXCEEDS the cap (strictly — an
+        // exactly-cap-sized line stays one line, no empty-piece artifact),
+        // then the remainder as the terminated line. Byte-exact: split, never
+        // dropped.
+        while (_partial.length + (i - start) > maxLineBytes) {
+          final take = maxLineBytes - _partial.length;
+          _partial.add(Uint8List.sublistView(chunk, start, start + take));
+          _onLine(_partial.takeBytes());
+          start += take;
+        }
         _partial.add(Uint8List.sublistView(chunk, start, i));
         _onLine(_partial.takeBytes());
         start = i + 1;

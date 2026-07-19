@@ -46,6 +46,21 @@ Future<void> main() async {
   check(a.err.contains('native-err'), 'native write(2) → stderr  [the core]');
   check(!a.out.contains('native-err') && !a.err.contains('native-out'),
       'streams kept distinct');
+  final aTyped = await Stdio.capture<int>(() {
+    print('typed-body');
+    return 41 + 1;
+  });
+  check(aTyped.value == 42 && aTyped.out.contains('typed-body'),
+      'capture<T>() returns the body value alongside the transcript');
+  final aOpt = await Stdio.capture(() {
+    for (var i = 0; i < 5; i++) {
+      print('opt-$i');
+    }
+  }, historyLines: 2);
+  check(aOpt.lines.length == 2, 'capture() forwards historyLines to start()');
+  check(aOpt.droppedLines == 3 && aOpt.droppedBytes == 3 * 'opt-0'.length,
+      'history eviction is counted in droppedLines/droppedBytes '
+      '(${aOpt.droppedLines} lines, ${aOpt.droppedBytes} bytes)');
 
   stderr.writeln('== B. start()/stop() controller: streams + history + restore ==');
   final b = await Stdio.start();
@@ -126,8 +141,8 @@ Future<void> main() async {
   final proc = await g.startProcess(
       'sh', ['-c', 'echo child-out; echo child-err >&2'],
       source: 'child');
-  await proc.exitCode;
-  await Future<void>.delayed(const Duration(milliseconds: 100));
+  await proc.process.exitCode;
+  await proc.drained; // full delivery, no sleep needed — that's its point
   await g.stop();
   check(
       g.history.any((l) =>

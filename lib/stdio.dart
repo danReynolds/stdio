@@ -25,6 +25,8 @@
 library;
 
 export 'src/captured_line.dart' show CapturedLine, StdStream;
-export 'src/stdio_base.dart' show Captured, Stdio, StdioRedirect;
+export 'src/exception.dart' show StdioException;
+export 'src/stdio_base.dart'
+    show Captured, CapturedProcess, Stdio, StdioRedirect;
 export 'src/terminal_sink.dart'
     show FdTerminalSink, StdoutTerminalSink, TerminalSink;

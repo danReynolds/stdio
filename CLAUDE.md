@@ -17,7 +17,7 @@ there immediately.
 ## Architecture notes
 - `lib/src/stdio_base.dart` (API/lifecycle) + `posix.dart` (all FFI): `dup()`
   saves the terminal fds, two `pipe()`s are `dup2`'d over fd 1/2; the saved
-  fd backs `terminal`/`terminalStdout` so a TUI renders during capture.
+  fd backs `terminal`/`terminalStderr` so a TUI renders during capture.
   Process-global: a second live `start()`/`capture()` throws `StateError`.
 - The reader isolate (`reader.dart`) blocks in `poll()` — no event loop —
   and owns all backpressure: continuous drain (writers never block),

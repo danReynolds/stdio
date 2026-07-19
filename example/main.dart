@@ -9,12 +9,13 @@ import 'dart:io';
 import 'package:stdio/stdio.dart';
 
 Future<void> main() async {
-  // ── 1. Scoped: capture exactly one body, get the transcript ──────────────
-  final cap = await Stdio.capture(() {
+  // ── 1. Scoped: capture exactly one body, get the transcript + its value ──
+  final cap = await Stdio.capture<int>(() {
     print('hello from stdout');
     stderr.writeln('and from stderr');
+    return 6 * 7; // whatever the body returns comes back on `.value`
   });
-  print('captured ${cap.lines.length} lines');
+  print('captured ${cap.lines.length} lines (body returned ${cap.value})');
   print('stdout side: ${cap.out}');
   print('stderr side: ${cap.err}');
 

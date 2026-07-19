@@ -11,6 +11,8 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'exception.dart';
+
 // ─── raw bindings ───────────────────────────────────────────────────────────
 
 final DynamicLibrary _libc = DynamicLibrary.process();
@@ -41,9 +43,14 @@ final int Function(int, int) _fcntlGet = _libc.lookupFunction<
 final int Function(int, int, int) _fcntlSet = _libc.lookupFunction<
     Int32 Function(Int32, Int32, VarArgs<(Int32,)>),
     int Function(int, int, int)>('fcntl');
-// int open(const char* path, int flags, mode_t mode)
+// int open(const char* path, int flags, ...) — VARIADIC in C (the mode is a
+// vararg), so it gets the same VarArgs binding as fcntl/ioctl: a fixed-arity
+// signature would pass the third argument in a register while an arm64-macOS
+// callee reads the varargs area. openForWrite never passes O_CREAT (the mode
+// is ignored then), but the binding must still use the real varargs ABI.
+// mode_t undergoes C default promotion to int in the varargs area.
 final int Function(Pointer<Utf8>, int, int) _open = _libc.lookupFunction<
-    Int32 Function(Pointer<Utf8>, Int32, Uint32),
+    Int32 Function(Pointer<Utf8>, Int32, VarArgs<(Int32,)>),
     int Function(Pointer<Utf8>, int, int)>('open');
 final int Function(int) _isatty =
     _libc.lookupFunction<Int32 Function(Int32), int Function(int)>('isatty');
@@ -136,7 +143,16 @@ int _retry(int Function() op) {
 
 int dup(int fd) => _retry(() => _dup(fd));
 int dup2(int oldFd, int newFd) => _retry(() => _dup2(oldFd, newFd));
-int closeFd(int fd) => _retry(() => _close(fd));
+
+/// A single `close()` — deliberately NOT retried on EINTR. On Linux and macOS
+/// the fd is deallocated even when close() returns EINTR, so a retry is a
+/// double-close: it can close an unrelated fd that was already reallocated to
+/// the same number (observed classes of this bug corrupt sockets and files at
+/// random). Treat EINTR as closed.
+int closeFd(int fd) {
+  final r = _close(fd);
+  return (r < 0 && errno == eintr) ? 0 : r;
+}
 int isatty(int fd) => _isatty(fd);
 int poll(Pointer<PollFd> fds, int n, int timeoutMs) =>
     _retry(() => _poll(fds, n, timeoutMs));
@@ -247,6 +263,16 @@ void setCloexec(int fd) {
   _fcntlSet(fd, fSetfd, flags | fdCloexec);
 }
 
+/// Reads [fd]'s file status flags (`fcntl(F_GETFL)`). Negative on error.
+int fdGetFlags(int fd) => _fcntlGet(fd, fGetfl);
+
+/// Sets [fd]'s file status flags (`fcntl(F_SETFL)`). Returns the fcntl result
+/// (negative on error). Used to RESTORE a saved fd's original flags at
+/// teardown: O_NONBLOCK set for the mirror-to-original path lives on the open
+/// file description, which the restored fd 1/2 (and, when the target is the
+/// tty, the parent shell) share.
+int fdSetFlags(int fd, int flags) => _fcntlSet(fd, fSetfl, flags);
+
 /// Adds O_NONBLOCK to [fd]'s file status flags so reads return EAGAIN instead
 /// of blocking, and VERIFIES it took. Throws on failure: the reader's drain
 /// loop is only correct on non-blocking fds (a blocking read() would stall the
@@ -306,11 +332,4 @@ int openForWrite(String path, {required bool append}) {
   } finally {
     malloc.free(ws);
   }
-}
-
-class StdioException implements Exception {
-  StdioException(this.message);
-  final String message;
-  @override
-  String toString() => 'StdioException: $message';
 }

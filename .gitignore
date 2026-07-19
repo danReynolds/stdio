@@ -3,3 +3,4 @@ pubspec.lock
 build/
 *.log
 dbg-out.txt
+doc/api/

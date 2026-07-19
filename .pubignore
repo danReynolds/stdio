@@ -6,3 +6,5 @@ build/
 *.log
 dbg-out.txt
 CLAUDE.md
+# Generated API docs (dart doc output) — pub.dev generates its own.
+doc/api/

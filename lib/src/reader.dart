@@ -15,6 +15,7 @@ import 'dart:typed_data';
 import 'package:ffi/ffi.dart';
 
 import 'captured_line.dart';
+import 'exception.dart';
 import 'line_assembler.dart';
 import 'posix.dart';
 
@@ -51,9 +52,11 @@ final class ReaderConfig {
   /// descriptors carry no frames (a served/agent app writing to a parent's
   /// pipe), so the parent keeps receiving output live while the capture
   /// feeds the in-app log. Best-effort and NEVER blocking (this loop's
-  /// contract): a full pipe carries a bounded backlog, then drops (counted
-  /// in the batch drop counters); a dead fd disables the mirror. The
-  /// controller owns and closes these fds — the reader only writes.
+  /// contract): a full pipe carries a bounded backlog, then drops — counted
+  /// in [ReaderBatch.mirrorDroppedBytes], a DEDICATED counter (these are
+  /// mirror-channel bytes, not capture-stream lines; the capture itself is
+  /// unaffected); a dead fd disables the mirror. The controller owns and
+  /// closes these fds — the reader only writes.
   final int? savedOutFd;
   final int? savedErrFd;
   final int maxLineBytes;
@@ -65,11 +68,17 @@ final class ReaderConfig {
 /// A batch of captured lines plus the reader's cumulative drop counters. Sent to
 /// the main isolate; `lines == null` with [done] true is the final message.
 final class ReaderBatch {
-  const ReaderBatch(this.lines, this.droppedLines, this.droppedBytes,
+  const ReaderBatch(
+      this.lines, this.droppedLines, this.droppedBytes, this.mirrorDroppedBytes,
       {this.done = false});
   final List<CapturedLine>? lines;
   final int droppedLines;
   final int droppedBytes;
+
+  /// Cumulative bytes the saved-fd mirror channel could not deliver (backlog
+  /// overflow past the bounded carry, or backlog discarded when a dead fd
+  /// disabled the mirror). A separate channel from the line counters above.
+  final int mirrorDroppedBytes;
   final bool done;
 }
 
@@ -102,6 +111,7 @@ class _Reader {
   int _credit = 0;
   int _droppedLines = 0;
   int _droppedBytes = 0;
+  int _mirrorDroppedBytes = 0;
   bool _outDone = false;
   bool _errDone = false;
   bool _stop = false;
@@ -253,7 +263,11 @@ class _Reader {
         ..add(bytes)
         ..addByte(0x0A);
     }
-    final line = CapturedLine(bytes: bytes, stream: stream, at: DateTime.now());
+    // seq is a placeholder here: the session stamps the real one on the main
+    // isolate as the line enters the transcript (so it's monotonic across
+    // every source, children included).
+    final line = CapturedLine(
+        bytes: bytes, stream: stream, at: DateTime.now(), seq: -1);
     _ring.add(line);
     if (_ring.length > cfg.historyLines) {
       final dropped = _ring.removeFirst();
@@ -291,6 +305,7 @@ class _Reader {
     }
     final wrote = fdWriteBest(fd, chunk);
     if (wrote < 0) {
+      _mirrorDroppedBytes += chunk.length;
       _disableSaved(stream);
     } else if (wrote < chunk.length) {
       _carryAdd(carry, Uint8List.sublistView(chunk, wrote));
@@ -299,11 +314,16 @@ class _Reader {
 
   void _carryAdd(BytesBuilder carry, Uint8List bytes) {
     final room = _savedCarryCap - carry.length;
-    if (room <= 0) return; // stalled parent: bounded backlog, then drop
+    if (room <= 0) {
+      // Stalled parent: bounded backlog, then drop — counted, never blocked.
+      _mirrorDroppedBytes += bytes.length;
+      return;
+    }
     if (bytes.length <= room) {
       carry.add(bytes);
     } else {
       carry.add(Uint8List.sublistView(bytes, 0, room));
+      _mirrorDroppedBytes += bytes.length - room;
     }
   }
 
@@ -315,6 +335,7 @@ class _Reader {
     final pending = carry.takeBytes();
     final wrote = fdWriteBest(fd, pending);
     if (wrote < 0) {
+      _mirrorDroppedBytes += pending.length;
       _disableSaved(stream);
     } else if (wrote < pending.length) {
       carry.add(Uint8List.sublistView(pending, wrote));
@@ -327,11 +348,14 @@ class _Reader {
   }
 
   void _disableSaved(StdStream stream) {
+    // The undelivered backlog is dropped with the channel — count it.
     if (stream == StdStream.out) {
       _savedOutFd = null;
+      _mirrorDroppedBytes += _savedOutCarry.length;
       _savedOutCarry.clear();
     } else {
       _savedErrFd = null;
+      _mirrorDroppedBytes += _savedErrCarry.length;
       _savedErrCarry.clear();
     }
   }
@@ -345,7 +369,8 @@ class _Reader {
       final batch = List<CapturedLine>.generate(
           take, (_) => _ring.removeFirst(),
           growable: false);
-      cfg.toMain.send(ReaderBatch(batch, _droppedLines, _droppedBytes));
+      cfg.toMain.send(
+          ReaderBatch(batch, _droppedLines, _droppedBytes, _mirrorDroppedBytes));
       _credit--;
     }
   }
@@ -382,10 +407,12 @@ class _Reader {
     _pumpSavedCarry(); // last best-effort push of mirror backlog
     _flushMirror();
     if (_ring.isNotEmpty) {
-      cfg.toMain.send(ReaderBatch(
-          List<CapturedLine>.of(_ring), _droppedLines, _droppedBytes));
+      cfg.toMain.send(ReaderBatch(List<CapturedLine>.of(_ring), _droppedLines,
+          _droppedBytes, _mirrorDroppedBytes));
       _ring.clear();
     }
-    cfg.toMain.send(ReaderBatch(null, _droppedLines, _droppedBytes, done: true));
+    cfg.toMain.send(ReaderBatch(
+        null, _droppedLines, _droppedBytes, _mirrorDroppedBytes,
+        done: true));
   }
 }

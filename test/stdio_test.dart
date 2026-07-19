@@ -7,12 +7,14 @@ import 'package:test/test.dart';
 
 void main() {
   // The library redirects the PROCESS's fd 1/2 — running it in-process would
-  // capture the test runner's own output. So the full end-to-end suite lives in
-  // bin/verify.dart and we run it as a subprocess, asserting it exits 0. It
+  // capture the test runner's own output. So the broad end-to-end suite lives
+  // in bin/verify.dart and we run it as a subprocess, asserting it exits 0. It
   // covers: native + Dart capture on both streams with correct tags, no deadlock
   // under a 40k-line storm with the main isolate blocked, double-start throws,
-  // divertToFile, mirror log, subprocess tagging, the classifier hook, multi-
-  // byte reassembly, and clean restore.
+  // redirectToFile, mirror log, subprocess tagging + drained, the classifier
+  // hook, typed capture values, eviction counting, multi-byte reassembly, and
+  // clean restore. (Targeted pinning scenarios live in test/e2e_test.dart's
+  // fixtures.)
   test('end-to-end verification harness passes (bin/verify.dart)', () async {
     final result = await Process.run(
       Platform.resolvedExecutable, // the dart VM

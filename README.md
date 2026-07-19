@@ -18,7 +18,7 @@ final cap = await Stdio.capture(() {
   greetFromC();       // C printf → write(1), invisible to zones/IOOverrides
   print('and dart');
 });
-print(cap.out);       // "hello from C\nand dart\n"
+print(cap.out);       // "hello from C\nand dart"
 ```
 
 ## Why not just replace `stdout`?
@@ -49,12 +49,13 @@ Three entry points, shaped like `Process.start` / `Process.run`:
 ```dart
 import 'package:stdio/stdio.dart';
 
-// 1. Scoped — capture exactly one body, get the transcript back:
-final cap = await Stdio.capture(() {
+// 1. Scoped — capture exactly one body, get the transcript AND its value back:
+final cap = await Stdio.capture<int>(() {
   greetFromC();
   print('and dart');
+  return 42;
 });
-print(cap.out);          // both lines; cap.err / cap.lines for more
+print(cap.out);          // both lines; cap.err / cap.lines / cap.value for more
 
 // 2. Session — capture until you stop:
 final capture = await Stdio.start();
@@ -69,8 +70,13 @@ await redirect.stop();
 ```
 
 Lines arrive as bytes (`CapturedLine.bytes`) with a lazy, replacement-safe UTF-8
-`.text` view, tagged stdout/stderr, plus `history` (what was captured before you
+`.text` view (one trailing `\r` tidied away), tagged stdout/stderr, with a
+monotonic per-session `seq`, plus `history` (what was captured before you
 subscribed) and drop accounting. ANSI codes pass through untouched.
+`capture()` takes the same `historyLines` / `maxLineBytes` / `mirrorToFile` /
+`classify` options as `start()`. Note that `redirectToFile` moves **both**
+descriptors — stdout *and* stderr land in the file, and nothing reaches the
+terminal until its `stop()`.
 
 ## Keeping a live terminal
 
@@ -87,6 +93,21 @@ capture.output.listen((l) => showSomewhere(l));   // captured stdout/stderr
 capture.terminal.write(renderedFrame);            // …still reaches the screen
 ```
 
+`capture.terminal` is a `StdoutTerminalSink` — simultaneously a `TerminalSink`
+(size, `isatty`, the raw fd) and a concrete `dart:io` `Stdout`, so it drops
+into APIs that require either; `capture.terminalStderr` is the saved fd 2
+counterpart for consumers that keep the stdout/stderr split. (`mirrorToFile`
+must point at a regular file: a FIFO with no reader would block `start()`
+forever — POSIX open-for-write semantics.)
+
+The inverse of rendering is *forwarding*: `start(mirrorToOriginal: true)`
+mirrors every captured raw chunk back to wherever fd 1/2 originally pointed —
+byte-transparent and split-intact, written off the main isolate and never
+blocking (a stalled target gets a bounded backlog, then counted drops on
+`mirrorDroppedBytes`). That's for sessions whose original descriptors carry no
+rendered frames, e.g. a served/agent app whose parent still wants the live
+byte stream while the capture feeds the in-app view.
+
 To hand the terminal to a child process (an `$EDITOR`, a pager) and take it back
 without ending the session — useful well beyond any UI:
 
@@ -100,9 +121,12 @@ await capture.resume();  // re-capture; the session stayed live throughout
 
 Child processes you start through the session are tagged and merged:
 `capture.startProcess('worker', [], source: 'worker')` labels every line with
-`source: 'worker'`, or `adopt()` a process you started yourself. Children
-spawned with `inheritStdio` are captured automatically (they inherit the
-redirected descriptors), just untagged.
+`source: 'worker'` and returns a `CapturedProcess` — the `process` plus a
+`drained` future that completes when its output is fully delivered (await it
+before a `stop()` that must include the child's tail). `adopt()` does the same
+for a process you started yourself. Children spawned with `inheritStdio` are
+captured automatically (they inherit the redirected descriptors), just
+untagged.
 
 ## What it does / doesn't
 
@@ -121,8 +145,10 @@ redirected descriptors), just untagged.
 
 - **Backpressure is bounded and never blocks.** A dedicated reader isolate
   drains the pipes continuously — even while your main isolate is stalled — so a
-  writer can't block on a full pipe. Under a storm it drops oldest (counted via
-  `droppedLines` / `droppedBytes`); it never OOMs or deadlocks.
+  writer can't block on a full pipe. Under a storm it drops oldest;
+  `droppedLines` / `droppedBytes` count exactly the lines missing from
+  `history` (reader-side drops plus history-ring evictions — evicted lines
+  were still delivered to live subscribers). It never OOMs or deadlocks.
 - **Lines are bounded too.** A writer that never emits a newline can't grow
   memory: runs longer than `maxLineBytes` (default 64 KiB) are delivered split
   into cap-sized pieces — split, not dropped.
@@ -134,8 +160,11 @@ redirected descriptors), just untagged.
   segfault — but fd redirection is process-local, so a crash leaves the parent
   shell untouched.
 - **One capture at a time.** fd redirection is process-global; a second
-  `start()` / `capture()` throws `StateError`. Tests using `capture()` must run
-  serially if they assert on process stdio.
+  `start()` / `capture()` throws `StateError`, and `Stdio.anyActive` is the
+  advisory probe for components coordinating around that. Call the entry
+  points from the main isolate only (the guard is isolate-local; the
+  redirection is not). Tests using `capture()` must run serially if they
+  assert on process stdio.
 - **Tag XOR exact cross-stream order.** Two pipes keep the stdout/stderr tag, so
   each stream is exact within itself but the combined `output` is only
   *approximately* interleaved across streams. Faithful byte order is available
@@ -153,9 +182,18 @@ redirected descriptors), just untagged.
   down first when you can.
 - **Don't pause a subscription.** A paused broadcast subscription buffers events
   unboundedly (Dart stream semantics). Slow consumers should sample `history`.
-- **After `stop()`**, `terminal` / `terminalStdout` are invalid (the saved fd is
-  closed), and a reader-isolate death during the session closes the line streams
-  (listeners get `onDone`) with the cause on `readerError`.
+- **After `stop()`**, `terminal` / `terminalStderr` are invalid (the saved fd
+  is closed), and `startProcess` / `adopt` / `pause` / `resume` throw
+  `StateError`. `stop()` also restores the descriptors' original file-status
+  flags, so a mirror session can't leave fd 1/2 (or a shared tty) accidentally
+  non-blocking.
+- **Reader death degrades loudly, not silently.** If the reader isolate dies
+  mid-session the line streams close (listeners get `onDone`), the cause lands
+  on `readerError` — and fd 1/2 are restored *immediately*, so your writes
+  can't wedge on pipes nobody drains. `stop()` still tears down normally. (If
+  a wedged-but-alive reader forces `stop()`'s drain timeout instead, teardown
+  deliberately leaks the reader-side fds rather than closing descriptors a
+  blocked syscall may still be using.)
 - **`/dev/tty`-direct writes escape** (rare), and native stdio may block-buffer a
   `stdout` writer when it's redirected to a pipe (well-behaved tools detect the
   non-tty and switch to line buffering or plain logs).
@@ -167,6 +205,11 @@ POSIX only — Linux and macOS, exercised on arm64 and x86-64. No Windows (a
 API). No web (no file descriptors). Flutter desktop on macOS/Linux shares the
 same VM and should work; mobile is untested, and Android/iOS system logging
 mostly bypasses fd 1/2 anyway.
+
+To check the package against your own platform/terminal setup, run the
+self-contained verification harness: `dart run stdio:verify` — it exercises
+capture, storms, restore ordering, and pause/resume, and prints
+`ALL CHECKS PASSED` on stderr when everything holds.
 
 ## Design
 

@@ -84,6 +84,52 @@ void main() {
     expect(a.hasPartial, isFalse);
   });
 
+  test('caps a newline-TERMINATED line arriving in one chunk (B2)', () {
+    // The newline branch must route through the same cap-splitting as the
+    // tail carry: a 40000-byte terminated line with cap=1024 previously
+    // bypassed the cap entirely and was emitted as one 40000-byte line.
+    final pieces = <int>[];
+    var total = 0;
+    final a = LineAssembler((b) {
+      pieces.add(b.length);
+      total += b.length;
+    }, maxLineBytes: 1024);
+    a.add(Uint8List.fromList([...List.filled(40000, 0x78), 0x0A]));
+    expect(pieces.every((p) => p <= 1024), isTrue,
+        reason: 'no piece may exceed the cap (got max '
+            '${pieces.reduce((m, p) => p > m ? p : m)})');
+    expect(total, 40000, reason: 'byte-exact: split, not dropped');
+    expect(pieces, [...List.filled(39, 1024), 64],
+        reason: '39 full pieces + the 64-byte remainder');
+    expect(a.hasPartial, isFalse);
+  });
+
+  test('caps a carried partial + terminated segment combo (B2)', () {
+    final pieces = <int>[];
+    var total = 0;
+    final a = LineAssembler((b) {
+      pieces.add(b.length);
+      total += b.length;
+    }, maxLineBytes: 1024);
+    a.add(Uint8List.fromList(List.filled(500, 0x61))); // carried, no newline
+    expect(a.hasPartial, isTrue);
+    a.add(Uint8List.fromList([...List.filled(700, 0x62), 0x0A]));
+    expect(total, 1200, reason: 'every byte delivered exactly once');
+    expect(pieces, [1024, 176],
+        reason: 'combined 1200 > cap: one full piece, then the remainder');
+    expect(a.hasPartial, isFalse);
+  });
+
+  test('exact-cap terminated line is NOT split (B2)', () {
+    final pieces = <int>[];
+    final a = LineAssembler((b) => pieces.add(b.length), maxLineBytes: 1024);
+    a.add(Uint8List.fromList([...List.filled(1024, 0x78), 0x0A]));
+    expect(pieces, [1024],
+        reason: 'a line exactly at the cap stays one line — no empty-piece '
+            'artifact');
+    expect(a.hasPartial, isFalse);
+  });
+
   test('retains no reference to the chunk after add() returns', () {
     // Locks the contract the reader isolate depends on: it hands add() a view
     // over its reused native read buffer, so both the emitted lines AND the
