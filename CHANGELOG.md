@@ -41,6 +41,9 @@ finalization pass (breaking — 0.4.0 was never published).
   permanently stalled the live feed after ~8 throws): the line is treated as
   unclassified and the first error is surfaced once on `readerError`.
 - `open(2)` is bound through `VarArgs` like the other variadic syscalls.
+- `StdioRedirect.stop()` releases the process-wide slot in a `finally`, so a
+  (nearly impossible) restore failure can no longer wedge the package with
+  no way to start a fresh session.
 
 **Breaking API changes**
 
@@ -54,15 +57,22 @@ finalization pass (breaking — 0.4.0 was never published).
 - `Stdio.capture()` accepts `historyLines` / `maxLineBytes` / `mirrorToFile`
   / `classify`, forwarded to `start()`.
 - `startProcess()` returns `CapturedProcess` (the `process` plus a `drained`
-  future that completes on full delivery); `adopt()` returns that drain
-  future directly.
+  future that completes on full delivery); `adopt()` now returns
+  `CapturedProcess` too (it was the bare drain future — ambiguous at the
+  call site) and throws a clear `StateError` when the child's streams were
+  already claimed (adopted twice / listened before adopt).
 - Renamed `mirrorToSavedFds:` → `mirrorToOriginal:` (introduced unpublished
   after 0.3.0), with real documentation and, new in this release, drop
   accounting (`mirrorDroppedBytes`) and end-to-end tests.
-- `terminal` is now typed `StdoutTerminalSink` — a `TerminalSink` *and* a
-  concrete `Stdout` — and the redundant `terminalStdout` is gone (it was a
-  second mutable-encoding handle to the same fd). `terminalStderr`
-  (introduced unpublished after 0.3.0) stays, as the saved fd 2 counterpart.
+- `terminal` is now typed `StdoutTerminalSink` — an `IOSink` with the
+  terminal accessors *and* a concrete `Stdout` — and the redundant
+  `terminalStdout` is gone (it was a second mutable-encoding handle to the
+  same fd). `terminalStderr` (introduced unpublished after 0.3.0) stays, as
+  the saved fd 2 counterpart. The abstract `TerminalSink` interface is gone
+  too: it had no consumers and both implementations are final, so
+  `FdTerminalSink` is now the documented base type (nullable-safe
+  `columns`/`rows`; `StdoutTerminalSink` adds the throwing Stdout-contract
+  `terminalColumns`/`terminalLines` view of the same data).
 - `CapturedLine` gained `seq`, a monotonic per-session sequence number
   stamped as each line enters the transcript — the robust history→stream
   stitch across `await`s (the constructor now requires it).
@@ -89,7 +99,7 @@ finalization pass (breaking — 0.4.0 was never published).
   on every entry point, `redirectToFile` moving BOTH descriptors, the
   FIFO-mirror caveat, `readerError` carrying the stringified isolate error,
   the gap-free history→subscribe recipe (and `seq` stitching), and
-  `TerminalSink.flush`/`close` semantics on the interface itself.
+  the sink `flush`/`close` no-op semantics on the sink type itself.
 - `dart run stdio:verify` is mentioned as the platform self-check.
 
 ## 0.3.0 — 2026-07-05

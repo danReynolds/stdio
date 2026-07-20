@@ -105,8 +105,8 @@ capture.output.listen((l) => showSomewhere(l));   // captured stdout/stderr
 capture.terminal.write(renderedFrame);            // …still reaches the screen
 ```
 
-`capture.terminal` is a `StdoutTerminalSink` — simultaneously a `TerminalSink`
-(size, `isatty`, the raw fd) and a concrete `dart:io` `Stdout`, so it drops
+`capture.terminal` is a `StdoutTerminalSink` — an `IOSink` with the terminal
+accessors (size, `isatty`, the raw fd) and a concrete `dart:io` `Stdout`, so it drops
 into APIs that require either; `capture.terminalStderr` is the saved fd 2
 counterpart for consumers that keep the stdout/stderr split. (`mirrorToFile`
 must point at a regular file: a FIFO with no reader would block `start()`

@@ -35,7 +35,7 @@ Future<void> main() async {
 
   // adopt() pre-stop returns the drain future too.
   final manual = await Process.start('sh', ['-c', 'echo adopted-line']);
-  await s.adopt(manual, source: 'manual');
+  await s.adopt(manual, source: 'manual').drained;
   final adoptDelivered =
       s.history.any((l) => l.text == 'adopted-line' && l.source == 'manual');
 
@@ -56,7 +56,7 @@ Future<void> main() async {
   final orphan = await Process.start('sh', ['-c', 'echo orphan']);
   var adoptThrew = false;
   try {
-    await s.adopt(orphan, source: 'late');
+    s.adopt(orphan, source: 'late');
   } on StateError {
     adoptThrew = true;
   }

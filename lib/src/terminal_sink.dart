@@ -4,44 +4,15 @@ import 'dart:io' show IOSink, Stdout, StdoutException;
 
 import 'posix.dart';
 
-/// A handle to the real terminal — the saved `dup` of fd 1, taken before the
+/// A handle to the real terminal — a saved `dup` of fd 1/2, taken before the
 /// redirect. Render through this to reach the screen while everything else is
 /// captured. It's an [IOSink] (so it drops into APIs that expect one) plus the
 /// terminal-specific accessors a TUI driver needs.
-abstract interface class TerminalSink implements IOSink {
-  /// Whether the saved fd is a real terminal (`isatty`).
-  bool get hasTerminal;
-
-  /// Terminal width in columns via `ioctl(TIOCGWINSZ)`, or null.
-  int? get columns;
-
-  /// Terminal height in rows, or null.
-  int? get rows;
-
-  /// Whether ANSI escapes are supported (true when it's a terminal).
-  bool get supportsAnsiEscapes;
-
-  /// The saved fd. Advanced: do not `close()` it or write to it concurrently
-  /// with this sink.
-  int get fd;
-
-  /// A no-op that completes immediately: writes at this layer are unbuffered
-  /// — every [add]/[write] is a completed `write()` syscall by the time it
-  /// returns — so there is never anything to flush.
-  @override
-  Future<void> flush();
-
-  /// A no-op: the capture session owns the saved fd's lifecycle (it restores
-  /// and closes it on `stop()`), so closing the sink must not close the fd —
-  /// that would break rendering mid-session.
-  @override
-  Future<void> close();
-}
-
-/// [TerminalSink] backed by direct FFI `write()`s to a fd. Writes are synchronous
-/// and loop over partial writes / EINTR (see [fdWriteAll] in posix.dart), so a
-/// frame can't be truncated.
-final class FdTerminalSink implements TerminalSink {
+///
+/// Backed by direct FFI `write()`s to the fd. Writes are synchronous and loop
+/// over partial writes / EINTR (see [fdWriteAll] in posix.dart), so a frame
+/// can't be truncated.
+final class FdTerminalSink implements IOSink {
   FdTerminalSink(int fd, {this.encoding = utf8}) : _fd = fd;
 
   final int _fd;
@@ -49,19 +20,25 @@ final class FdTerminalSink implements TerminalSink {
   @override
   Encoding encoding;
 
-  @override
+  /// The saved fd. Advanced: do not `close()` it or write to it concurrently
+  /// with this sink.
   int get fd => _fd;
 
-  @override
+  /// Whether the saved fd is a real terminal (`isatty`).
   bool get hasTerminal => isatty(_fd) == 1;
 
-  @override
+  /// Terminal width in columns via `ioctl(TIOCGWINSZ)`, or null when [fd] is
+  /// not a terminal. ([StdoutTerminalSink.terminalColumns] is the
+  /// [Stdout]-contract view of the same value: it throws instead of
+  /// returning null.)
   int? get columns => terminalSize(_fd)?.$1;
 
-  @override
+  /// Terminal height in rows, or null when [fd] is not a terminal.
+  /// ([StdoutTerminalSink.terminalLines] is the throwing [Stdout]-contract
+  /// view.)
   int? get rows => terminalSize(_fd)?.$2;
 
-  @override
+  /// Whether ANSI escapes are supported (true when it's a terminal).
   bool get supportsAnsiEscapes => hasTerminal;
 
   @override
@@ -101,17 +78,17 @@ final class FdTerminalSink implements TerminalSink {
   @override
   Future<void> addStream(Stream<List<int>> stream) => stream.forEach(add);
 
+  /// A no-op that completes immediately: writes at this layer are unbuffered
+  /// — every [add]/[write] is a completed `write()` syscall by the time it
+  /// returns — so there is never anything to flush.
   @override
-  Future<void> flush() async {
-    // Writes are unbuffered at this layer (each [add] is a completed write()),
-    // so there's nothing to flush.
-  }
+  Future<void> flush() async {}
 
+  /// A no-op: the capture session owns the saved fd's lifecycle (it restores
+  /// and closes it on `stop()`), so closing the sink must not close the fd —
+  /// that would break rendering mid-session.
   @override
-  Future<void> close() async {
-    // The capture controller owns the fd's lifecycle (it restores + closes on
-    // stop()); closing here would break rendering mid-session.
-  }
+  Future<void> close() async {}
 
   @override
   Future<void> get done => Future<void>.value();
@@ -119,7 +96,10 @@ final class FdTerminalSink implements TerminalSink {
 
 /// A [Stdout]-compatible adapter over the saved terminal fd, for consumers (a
 /// TUI driver, say) that expect a concrete [Stdout] rather than an [IOSink].
-/// Reuses [FdTerminalSink]'s write path.
+/// Reuses [FdTerminalSink]'s write path, and carries both vocabularies for
+/// the terminal size: the inherited nullable-safe [columns]/[rows] and the
+/// [Stdout]-contract [terminalColumns]/[terminalLines] (which throw when
+/// there is no terminal) — same data, two failure contracts.
 final class StdoutTerminalSink extends FdTerminalSink implements Stdout {
   StdoutTerminalSink(super.fd, {super.encoding});
 

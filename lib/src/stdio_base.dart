@@ -75,11 +75,17 @@ final class StdioRedirect {
   Future<void> stop() async {
     if (_stopped) return;
     _stopped = true;
-    dup2(_saved1, 1);
-    dup2(_saved2, 2);
-    closeFd(_saved1);
-    closeFd(_saved2);
-    Stdio._busy = false;
+    try {
+      dup2(_saved1, 1);
+      dup2(_saved2, 2);
+      closeFd(_saved1);
+      closeFd(_saved2);
+    } finally {
+      // Even if a restore call throws (a dup2 of a healthy saved fd
+      // essentially cannot, but fail-safe beats fail-wedged), release the
+      // process-wide slot so a fresh session/redirect remains possible.
+      Stdio._busy = false;
+    }
   }
 }
 
@@ -180,10 +186,11 @@ final class Stdio {
   /// The real terminal — wherever fd 1 originally pointed (the saved dup) —
   /// for rendering to the screen while everything else is captured.
   ///
-  /// A [StdoutTerminalSink], so it is BOTH a [TerminalSink] (size, `isatty`,
-  /// raw fd) and a concrete [io.Stdout] — it drops into APIs that require
-  /// either, with one shared, mutable [StdoutTerminalSink.encoding]. Invalid
-  /// once [stop] completes (the controller closes the saved fd).
+  /// A [StdoutTerminalSink] — an [io.IOSink] with the terminal accessors
+  /// (size, `isatty`, the raw fd) AND a concrete [io.Stdout] — so it drops
+  /// into APIs that require either, with one shared, mutable
+  /// [StdoutTerminalSink.encoding]. Invalid once [stop] completes (the
+  /// controller closes the saved fd).
   final StdoutTerminalSink terminal;
 
   /// Where fd 2 originally pointed (the saved dup). The two can differ
@@ -581,7 +588,7 @@ final class Stdio {
         includeParentEnvironment: includeParentEnvironment,
         runInShell: runInShell);
     try {
-      return CapturedProcess._(proc, adopt(proc, source: source));
+      return adopt(proc, source: source);
     } on StateError {
       // The session stopped during the spawn await. Don't leak a child no one
       // can reach — its unlistened pipes would wedge it at ~64 KiB anyway.
@@ -597,11 +604,27 @@ final class Stdio {
   ///
   /// Throws [StateError] if the capture is already stopped (or its reader
   /// died — see [readerError]), instead of silently discarding the output.
-  Future<void> adopt(io.Process child, {required String source}) {
+  ///
+  /// Adoption claims the child's `stdout`/`stderr` streams — they must not
+  /// already be listened to (each is single-subscription), so a child can be
+  /// adopted once, and only if you haven't consumed its streams yourself.
+  /// Returns a [CapturedProcess] wrapping [child]; await
+  /// [CapturedProcess.drained] before a [stop] that must include the child's
+  /// final output.
+  CapturedProcess adopt(io.Process child, {required String source}) {
     _checkLive();
-    final out = _pipeChild(child.stdout, StdStream.out, source);
-    final err = _pipeChild(child.stderr, StdStream.err, source);
-    return Future.wait([out, err]).then((_) {});
+    final Future<void> out;
+    final Future<void> err;
+    try {
+      out = _pipeChild(child.stdout, StdStream.out, source);
+      err = _pipeChild(child.stderr, StdStream.err, source);
+    } on StateError {
+      throw StateError(
+        "stdio: adopt() could not claim the child's stdout/stderr — "
+        'already listened to (adopted twice, or consumed before adopt?)',
+      );
+    }
+    return CapturedProcess._(child, Future.wait([out, err]).then((_) {}));
   }
 
   Future<void> _pipeChild(Stream<List<int>> stream, StdStream s, String source) {
